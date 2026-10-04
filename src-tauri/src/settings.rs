@@ -148,7 +148,21 @@ fn write_settings_file(path: &PathBuf, settings: &AppSettings) -> Result<(), Str
     }
     let json =
         serde_json::to_string_pretty(settings).map_err(|e| format!("serialize settings: {e}"))?;
-    fs::write(path, json).map_err(|e| format!("write settings: {e}"))
+    // Temp + rename so a crash mid-write cannot leave a truncated settings.json.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, json.as_bytes()).map_err(|e| format!("write settings temp: {e}"))?;
+    // On Windows, rename fails if the destination exists — remove first (best-effort).
+    #[cfg(windows)]
+    {
+        if path.exists() {
+            fs::remove_file(path).map_err(|e| format!("replace settings: {e}"))?;
+        }
+    }
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("rename settings: {e}"));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -258,5 +272,33 @@ mod tests {
         assert_eq!(d.concurrency, DEFAULT_CONCURRENCY);
         assert!(d.strip_metadata);
         assert!(d.window_size.is_none());
+    }
+
+    #[test]
+    fn write_settings_file_uses_atomic_rename() {
+        let dir = std::env::temp_dir().join(format!(
+            "filesize-obliterator-settings-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(SETTINGS_FILE_NAME);
+
+        let mut settings = AppSettings::default();
+        settings.concurrency = 3;
+        settings.strip_metadata = false;
+        write_settings_file(&path, &settings).expect("first write");
+        assert_eq!(read_settings_file(&path).concurrency, 3);
+        assert!(!path.with_extension("json.tmp").exists());
+
+        // Overwrite existing file (covers Windows replace path).
+        settings.concurrency = 1;
+        write_settings_file(&path, &settings).expect("second write");
+        let loaded = read_settings_file(&path);
+        assert_eq!(loaded.concurrency, 1);
+        assert!(!loaded.strip_metadata);
+        assert!(!path.with_extension("json.tmp").exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

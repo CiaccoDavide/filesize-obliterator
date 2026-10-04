@@ -157,6 +157,7 @@ fn capabilities_do_not_grant_http_client() {
 }
 
 /// Window size restore uses `setSize`; `core:window:default` does not include it.
+/// CloseRequested flush awaits save then `destroy()` — also not in the window default set.
 #[test]
 fn capabilities_grant_window_set_size() {
     let caps = parse_json(&repo_root().join("src-tauri/capabilities/default.json"));
@@ -169,6 +170,12 @@ fn capabilities_grant_window_set_size() {
             .iter()
             .any(|perm| permission_identifier(perm) == Some("core:window:allow-set-size")),
         "capabilities must grant core:window:allow-set-size for settings window restore"
+    );
+    assert!(
+        permissions
+            .iter()
+            .any(|perm| permission_identifier(perm) == Some("core:window:allow-destroy")),
+        "capabilities must grant core:window:allow-destroy for CloseRequested settings flush"
     );
 }
 
@@ -285,6 +292,10 @@ fn settings_persist_locally_without_network_plugins() {
     assert!(
         settings.contains("app_config_dir") || settings.contains("SETTINGS_FILE_NAME"),
         "settings module must write to the local app config dir"
+    );
+    assert!(
+        settings.contains("json.tmp") && settings.contains("rename"),
+        "settings write must use temp file + atomic rename"
     );
     assert!(
         !settings.contains("http://") && !settings.contains("https://"),

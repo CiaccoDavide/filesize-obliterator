@@ -62,6 +62,7 @@ export function useLocalSettings(): LocalSettingsApi {
         try {
           const saved = await settingsSave(toSave);
           if (generation !== saveGeneration.current) return;
+          settingsRef.current = saved;
           setSettings(saved);
           setStatus(null);
         } catch (err) {
@@ -71,15 +72,21 @@ export function useLocalSettings(): LocalSettingsApi {
       });
   }, []);
 
-  const flushSave = useCallback(() => {
+  const flushSave = useCallback((): Promise<void> => {
     if (saveTimer.current) {
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
     const toSave = pendingSave.current;
-    if (!toSave) return;
-    pendingSave.current = null;
-    enqueueSave(toSave, saveGeneration.current);
+    if (toSave) {
+      pendingSave.current = null;
+      enqueueSave(toSave, saveGeneration.current);
+    }
+    // Await the serialized chain so quit/hide can wait for disk durability.
+    return saveChain.current.then(
+      () => undefined,
+      () => undefined,
+    );
   }, [enqueueSave]);
 
   const scheduleSave = useCallback(
@@ -100,14 +107,15 @@ export function useLocalSettings(): LocalSettingsApi {
 
   const commit = useCallback(
     (updater: (prev: AppSettings) => AppSettings) => {
-      setSettings((prev) => {
-        const next = updater(prev);
-        if (!skipNextSave.current) {
-          saveGeneration.current += 1;
-          scheduleSave(next);
-        }
-        return next;
-      });
+      // Compute next + bump generation outside setState: StrictMode may
+      // double-invoke updaters, which would double-schedule saves.
+      const next = updater(settingsRef.current);
+      settingsRef.current = next;
+      setSettings(next);
+      if (!skipNextSave.current) {
+        saveGeneration.current += 1;
+        scheduleSave(next);
+      }
     },
     [scheduleSave],
   );
@@ -119,6 +127,7 @@ export function useLocalSettings(): LocalSettingsApi {
         const loadedSettings = await settingsLoad();
         if (cancelled) return;
         skipNextSave.current = true;
+        settingsRef.current = loadedSettings;
         setSettings(loadedSettings);
         setLoaded(true);
         setStatus(null);
@@ -145,7 +154,9 @@ export function useLocalSettings(): LocalSettingsApi {
       } catch (err) {
         if (cancelled) return;
         skipNextSave.current = true;
-        setSettings(defaultSettings());
+        const fallback = defaultSettings();
+        settingsRef.current = fallback;
+        setSettings(fallback);
         setLoaded(true);
         setStatus(`SETTINGS LOAD FAILED — ${terseError(err)}`);
         queueMicrotask(() => {
@@ -159,13 +170,14 @@ export function useLocalSettings(): LocalSettingsApi {
   }, []);
 
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    let unlistenResize: (() => void) | undefined;
+    let unlistenClose: (() => void) | undefined;
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 
     void (async () => {
       try {
         const win = getCurrentWindow();
-        unlisten = await win.onResized(({ payload }) => {
+        unlistenResize = await win.onResized(({ payload }) => {
           if (resizeTimer) clearTimeout(resizeTimer);
           resizeTimer = setTimeout(() => {
             void (async () => {
@@ -183,23 +195,32 @@ export function useLocalSettings(): LocalSettingsApi {
             })();
           }, 500);
         });
+        // Await flush before destroy — Tauri runs destroy after the handler settles
+        // unless preventDefault() was called.
+        unlistenClose = await win.onCloseRequested(async () => {
+          await flushSave();
+        });
       } catch {
         // non-Tauri
       }
     })();
 
     const onHidden = () => {
-      if (document.visibilityState === "hidden") flushSave();
+      if (document.visibilityState === "hidden") void flushSave();
+    };
+    const onPageHide = () => {
+      void flushSave();
     };
     document.addEventListener("visibilitychange", onHidden);
-    window.addEventListener("pagehide", flushSave);
+    window.addEventListener("pagehide", onPageHide);
 
     return () => {
-      unlisten?.();
+      unlistenResize?.();
+      unlistenClose?.();
       if (resizeTimer) clearTimeout(resizeTimer);
       document.removeEventListener("visibilitychange", onHidden);
-      window.removeEventListener("pagehide", flushSave);
-      flushSave();
+      window.removeEventListener("pagehide", onPageHide);
+      void flushSave();
     };
   }, [commit, flushSave]);
 
