@@ -13,6 +13,7 @@ use super::image_encode::{encode_image, resolve_image_output_ext};
 use super::output::prepare_output_path;
 use super::pdf_encode::encode_pdf;
 use super::presets::{audio_preset, pdf_preset, video_preset};
+use super::skip::{lookup_existing_output, record_output, SKIP_REASON_ALREADY};
 use super::state::{apply_transition, should_continue, Transition, TransitionError};
 use super::types::{
     CompressEvent, CompressStartRequest, JobInfo, JobStatus, MediaKind, COMPRESS_EVENT,
@@ -91,6 +92,11 @@ impl JobManager {
             .map_err(|e| format!("cannot read source: {e}"))?
             .len();
 
+        if let Some(existing) = existing_output_to_skip(&request, &source) {
+            let result_bytes = fs::metadata(&existing).map(|m| m.len()).unwrap_or(0);
+            return self.admit_skipped(request, original_bytes, existing, result_bytes);
+        }
+
         let manager = self.clone();
         let source_path = request.source_path.clone();
         let preset_id = request.preset_id.clone();
@@ -110,6 +116,43 @@ impl JobManager {
                 cancel,
             );
         })
+    }
+
+    /// Record a terminal skipped job (no worker / no encode).
+    fn admit_skipped(
+        &self,
+        request: CompressStartRequest,
+        original_bytes: u64,
+        output_path: PathBuf,
+        result_bytes: u64,
+    ) -> Result<JobInfo, String> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| "job manager lock poisoned".to_string())?;
+        let id = format!("job-{}", guard.next_id);
+        guard.next_id += 1;
+        let info = JobInfo {
+            id: id.clone(),
+            source_path: request.source_path,
+            media_kind: request.media_kind,
+            preset_id: request.preset_id,
+            status: JobStatus::Skipped,
+            percent: 100.0,
+            error: Some(SKIP_REASON_ALREADY.into()),
+            output_path: Some(output_path.to_string_lossy().into_owned()),
+            original_bytes: Some(original_bytes),
+            result_bytes: Some(result_bytes),
+            duration_ms: Some(0),
+        };
+        guard.jobs.insert(
+            id,
+            JobRecord {
+                info: info.clone(),
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        Ok(info)
     }
 
     /// Admit a job into the ordered queue and pump workers up to [`MAX_CONCURRENT_JOBS`].
@@ -388,6 +431,7 @@ impl JobManager {
             media_kind: MediaKind::Image,
             preset_id: "balanced".into(),
             strip_metadata: true,
+            force: false,
         };
         self.admit(request, original_bytes, move |_job_id, cancel| work(cancel))
     }
@@ -423,6 +467,17 @@ fn cancel_job(manager: &JobManager, app: &AppHandle, job_id: String) {
             error,
         },
     );
+}
+
+/// When not forcing, return an existing output for this source+preset (if any).
+fn existing_output_to_skip(
+    request: &CompressStartRequest,
+    source: &Path,
+) -> Option<PathBuf> {
+    if request.force {
+        return None;
+    }
+    lookup_existing_output(source, &request.preset_id)
 }
 
 fn resolve_output_ext(
@@ -696,6 +751,8 @@ fn run_job(
         duration_ms,
     ) {
         Ok(true) => {
+            // Best-effort sidecar so a later re-drop of source+preset can skip.
+            let _ = record_output(&source, &preset_id, &output_path);
             emit(
                 &app,
                 CompressEvent::Log {
@@ -959,5 +1016,76 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(finished.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn skip_by_default_when_sidecar_and_output_exist() {
+        let root = std::env::temp_dir().join(format!(
+            "fo-mgr-skip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("root");
+        let source = root.join("Holiday.JPG");
+        fs::write(&source, b"src-bytes").expect("source");
+        let out = root.join("_compressed").join("Holiday.webp");
+        fs::create_dir_all(out.parent().unwrap()).expect("dir");
+        fs::write(&out, b"encoded").expect("out");
+        record_output(&source, "image-balanced", &out).expect("sidecar");
+
+        let request = CompressStartRequest {
+            source_path: source.to_string_lossy().into_owned(),
+            media_kind: MediaKind::Image,
+            preset_id: "image-balanced".into(),
+            strip_metadata: true,
+            force: false,
+        };
+        let existing = existing_output_to_skip(&request, &source).expect("should skip");
+        assert_eq!(existing, out);
+
+        let manager = JobManager::default();
+        let info = manager
+            .admit_skipped(request, 9, existing, 7)
+            .expect("admit skipped");
+        assert_eq!(info.status, JobStatus::Skipped);
+        assert_eq!(info.error.as_deref(), Some(SKIP_REASON_ALREADY));
+        assert_eq!(info.output_path.as_deref(), Some(out.to_str().unwrap()));
+        assert_eq!(info.percent, 100.0);
+        assert_eq!(manager.wait_queue_len_for_test(), 0);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn force_bypasses_existing_output_lookup() {
+        let root = std::env::temp_dir().join(format!(
+            "fo-mgr-force-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("root");
+        let source = root.join("Holiday.JPG");
+        fs::write(&source, b"src-bytes").expect("source");
+        let out = root.join("_compressed").join("Holiday.webp");
+        fs::create_dir_all(out.parent().unwrap()).expect("dir");
+        fs::write(&out, b"encoded").expect("out");
+        record_output(&source, "image-balanced", &out).expect("sidecar");
+
+        let request = CompressStartRequest {
+            source_path: source.to_string_lossy().into_owned(),
+            media_kind: MediaKind::Image,
+            preset_id: "image-balanced".into(),
+            strip_metadata: true,
+            force: true,
+        };
+        assert_eq!(existing_output_to_skip(&request, &source), None);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

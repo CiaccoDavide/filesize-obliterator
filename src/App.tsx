@@ -45,6 +45,8 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   /** Session privacy control — bound into compress_start as stripMetadata (default on). */
   const [stripMetadata, setStripMetadata] = useState(true);
+  /** When on, re-encode even if source+preset already has a `_compressed` output. */
+  const [forceReencode, setForceReencode] = useState(false);
   const presets = usePresets();
   const {
     staged,
@@ -176,6 +178,28 @@ function App() {
             >
               compress_start.stripMetadata={String(stripMetadata)}
             </p>
+            <label className="hud-toggle">
+              <input
+                type="checkbox"
+                checked={forceReencode}
+                onChange={(e) => setForceReencode(e.target.checked)}
+              />
+              <span className="hud-toggle-label">Force</span>
+              <span className="mono hud-toggle-state">
+                {forceReencode ? "ON" : "OFF"}
+              </span>
+            </label>
+            <p className="hud-toggle-hint">
+              {forceReencode
+                ? "Re-encode even when this source+preset already has output."
+                : "Skip when an existing `_compressed` output matches source+preset."}
+            </p>
+            <p
+              className="hud-toggle-hint mono"
+              data-testid="force-payload"
+            >
+              compress_start.force={String(forceReencode)}
+            </p>
           </div>
 
           <CompressProgressPanel
@@ -187,7 +211,10 @@ function App() {
             aborting={compress.aborting}
             stagedCount={staged.length}
             onStart={() =>
-              void compress.startStaged(staged, { stripMetadata })
+              void compress.startStaged(staged, {
+                stripMetadata,
+                force: forceReencode,
+              })
             }
             onAbort={() => void compress.abortAll()}
             onCancelOne={(jobId) => void compress.cancelOne(jobId)}

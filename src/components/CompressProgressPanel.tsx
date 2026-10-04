@@ -40,7 +40,7 @@ function rowCancellable(row: ProgressRow): boolean {
 
 function phaseTone(phase: OpsPhase): "ok" | "warn" | "danger" {
   if (phase === "FAILED") return "danger";
-  if (phase === "ABORTING") return "warn";
+  if (phase === "ABORTING" || phase === "SKIPPED") return "warn";
   return "ok";
 }
 
@@ -53,6 +53,11 @@ function rowDetail(row: ProgressRow): string {
     );
     const out = row.outputPath ?? "—";
     return delta ? `${out} · ${delta}` : out;
+  }
+  if (row.phase === "SKIPPED") {
+    const reason = row.error ?? "already compressed for this preset";
+    const out = row.outputPath ? ` · ${row.outputPath}` : "";
+    return `${reason}${out}`;
   }
   if (row.phase === "FAILED" && row.error) {
     return row.error;
@@ -76,7 +81,8 @@ export function CompressProgressPanel({
 }: Props) {
   const tone = phaseTone(phase);
   const stats = aggregateSessionStats(rows);
-  const hasFinished = stats.filesDone + stats.filesFailed > 0;
+  const hasFinished =
+    stats.filesDone + stats.filesFailed + stats.filesSkipped > 0;
 
   return (
     <section className="hud-frame compress-panel" aria-label="Compress progress">
@@ -107,6 +113,10 @@ export function CompressProgressPanel({
           <div className="meter">
             <span className="meter-label">Fail</span>
             <span className="meter-value mono">{stats.filesFailed}</span>
+          </div>
+          <div className="meter">
+            <span className="meter-label">Skip</span>
+            <span className="meter-value mono">{stats.filesSkipped}</span>
           </div>
           <div className="meter">
             <span className="meter-label">In</span>
