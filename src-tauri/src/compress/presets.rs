@@ -10,6 +10,11 @@ pub const IMAGE_HIGH: &str = "image-high";
 pub const IMAGE_BALANCED: &str = "image-balanced";
 pub const IMAGE_SMALL: &str = "image-small";
 
+/// Stable audio preset ids.
+pub const AUDIO_HIGH: &str = "audio-high";
+pub const AUDIO_BALANCED: &str = "audio-balanced";
+pub const AUDIO_SMALL: &str = "audio-small";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PresetInfo {
@@ -84,9 +89,72 @@ pub fn image_preset(id: &str) -> Option<&'static ImagePreset> {
     IMAGE_PRESETS.iter().find(|p| p.id == id)
 }
 
-/// All built-in presets (currently image-only; other kinds arrive in later tasks).
+/// CBR MP3 bitrate class for audio presets (kbps).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioBitrateKbps {
+    Kbps320 = 320,
+    Kbps192 = 192,
+    Kbps128 = 128,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AudioPreset {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub bitrate: AudioBitrateKbps,
+}
+
+impl AudioPreset {
+    pub fn output_ext(&self) -> &'static str {
+        "mp3"
+    }
+
+    pub fn info(&self) -> PresetInfo {
+        PresetInfo {
+            id: self.id.into(),
+            label: self.label.into(),
+            kind: MediaKind::Audio,
+            description: self.description.into(),
+        }
+    }
+}
+
+/// Built-in audio presets — three distinct CBR MP3 bitrate alternatives.
+const AUDIO_PRESETS: &[AudioPreset] = &[
+    AudioPreset {
+        id: AUDIO_HIGH,
+        label: "High",
+        description: "High-quality MP3 (320 kbps CBR). Quality-first; may not shrink already-small MP3s.",
+        bitrate: AudioBitrateKbps::Kbps320,
+    },
+    AudioPreset {
+        id: AUDIO_BALANCED,
+        label: "Balanced",
+        description: "Balanced MP3 (192 kbps CBR). Good quality/size tradeoff for typical tracks.",
+        bitrate: AudioBitrateKbps::Kbps192,
+    },
+    AudioPreset {
+        id: AUDIO_SMALL,
+        label: "Small",
+        description: "Small MP3 (128 kbps CBR). Prioritizes file size over fine detail.",
+        bitrate: AudioBitrateKbps::Kbps128,
+    },
+];
+
+pub fn audio_presets() -> &'static [AudioPreset] {
+    AUDIO_PRESETS
+}
+
+pub fn audio_preset(id: &str) -> Option<&'static AudioPreset> {
+    AUDIO_PRESETS.iter().find(|p| p.id == id)
+}
+
+/// All built-in presets (image + audio; video/pdf arrive in later tasks).
 pub fn all_presets() -> Vec<PresetInfo> {
-    image_presets().iter().map(ImagePreset::info).collect()
+    let mut out: Vec<_> = image_presets().iter().map(ImagePreset::info).collect();
+    out.extend(audio_presets().iter().map(AudioPreset::info));
+    out
 }
 
 pub fn presets_for_kind(kind: &MediaKind) -> Vec<PresetInfo> {
@@ -113,9 +181,27 @@ mod tests {
     }
 
     #[test]
-    fn presets_for_kind_filters_image() {
+    fn audio_registry_has_three_stable_ids() {
+        let ids: Vec<_> = audio_presets().iter().map(|p| p.id).collect();
+        assert_eq!(ids, vec![AUDIO_HIGH, AUDIO_BALANCED, AUDIO_SMALL]);
+        for p in audio_presets() {
+            assert_eq!(p.info().kind, MediaKind::Audio);
+            assert!(!p.label.is_empty());
+            assert!(!p.description.is_empty());
+            assert_eq!(p.output_ext(), "mp3");
+        }
+        assert_eq!(audio_preset(AUDIO_HIGH).unwrap().bitrate, AudioBitrateKbps::Kbps320);
+        assert_eq!(
+            audio_preset(AUDIO_BALANCED).unwrap().bitrate,
+            AudioBitrateKbps::Kbps192
+        );
+        assert_eq!(audio_preset(AUDIO_SMALL).unwrap().bitrate, AudioBitrateKbps::Kbps128);
+    }
+
+    #[test]
+    fn presets_for_kind_filters_image_and_audio() {
         assert_eq!(presets_for_kind(&MediaKind::Image).len(), 3);
-        assert!(presets_for_kind(&MediaKind::Audio).is_empty());
+        assert_eq!(presets_for_kind(&MediaKind::Audio).len(), 3);
         assert!(presets_for_kind(&MediaKind::Video).is_empty());
         assert!(presets_for_kind(&MediaKind::Pdf).is_empty());
     }
@@ -128,5 +214,11 @@ mod tests {
         assert!(json.contains("\"kind\":\"image\""));
         assert!(json.contains("\"label\":\"Balanced\""));
         assert!(json.contains("\"description\":"));
+
+        let audio = audio_preset(AUDIO_BALANCED).unwrap().info();
+        let json = serde_json::to_string(&audio).expect("ser");
+        assert!(json.contains("\"id\":\"audio-balanced\""));
+        assert!(json.contains("\"kind\":\"audio\""));
+        assert!(json.contains("\"label\":\"Balanced\""));
     }
 }

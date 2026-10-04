@@ -1,3 +1,4 @@
+mod audio_encode;
 mod image_encode;
 mod manager;
 mod output;
