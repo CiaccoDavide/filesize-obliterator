@@ -300,10 +300,11 @@ export function applyCompressEvent(
     case "log":
       return working;
     case "complete":
-      // Late complete must not overwrite FAILED/ABORTING (or clobber SKIPPED).
+      // Complete may win over ABORTING (cancel raced with a finished encode).
+      // Do not overwrite FAILED/SKIPPED/COMPLETE — late complete after failure
+      // must not resurrect a success path.
       if (
         row.phase === "FAILED" ||
-        row.phase === "ABORTING" ||
         row.phase === "SKIPPED" ||
         row.phase === "COMPLETE"
       ) {

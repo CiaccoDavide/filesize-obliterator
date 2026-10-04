@@ -11,6 +11,7 @@ import {
   formatSavePercent,
   formatSignedBytes,
 } from "../compress/sessionStats";
+import { isImagePreviewable } from "../preview/imagePreview";
 import type { RevealAction } from "../reveal/actions";
 import { RevealRowActions } from "./RevealRowActions";
 
@@ -33,6 +34,7 @@ type Props = {
   onClearFinished: () => void;
   onRetryFailed: () => void;
   onDismissFailed: () => void;
+  onPreviewImage?: (row: ProgressRow) => void;
   onReveal?: (
     action: RevealAction,
     targets: { sourcePath: string; outputPath?: string },
@@ -94,6 +96,7 @@ export function CompressProgressPanel({
   onClearFinished,
   onRetryFailed,
   onDismissFailed,
+  onPreviewImage,
   onReveal,
 }: Props) {
   const tone = phaseTone(phase);
@@ -278,6 +281,16 @@ export function CompressProgressPanel({
                     aria-label={`Cancel ${row.sourcePath}`}
                   >
                     CANCEL
+                  </button>
+                ) : null}
+                {onPreviewImage && isImagePreviewable(row) ? (
+                  <button
+                    type="button"
+                    className="btn compress-row-preview"
+                    onClick={() => onPreviewImage(row)}
+                    aria-label={`Preview ${row.sourcePath}`}
+                  >
+                    PREVIEW
                   </button>
                 ) : null}
               </div>

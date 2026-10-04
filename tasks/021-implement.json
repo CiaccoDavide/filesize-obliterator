@@ -1,0 +1,40 @@
+{
+  "issue": 21,
+  "task": "021-image-before-after-preview",
+  "branch": "ship/21-image-preview",
+  "base": "origin/main",
+  "closes": "#21",
+  "status": "implemented",
+  "acceptance": [
+    {
+      "id": "compare-completed-image",
+      "met": true,
+      "via": "ImageComparePreview overlay from completed image ProgressRow; Original/Compressed panes + wipe"
+    },
+    {
+      "id": "offline-filesystem",
+      "met": true,
+      "via": "preview_allow_assets → temp rasters + convertFileSrc asset URLs; no remote hosts"
+    },
+    {
+      "id": "ice-hud-framing",
+      "met": true,
+      "via": "hud-frame preview-panel / preview-overlay; LOAD FAIL / SCOPE DENIED status"
+    },
+    {
+      "id": "close-keeps-queue",
+      "met": true,
+      "via": "onClose + Escape + scrim; preview_revoke_assets; compress rows untouched"
+    }
+  ],
+  "choices": {
+    "tiffHeicPreview": "rust-rasterize-temp-png",
+    "assetScope": "jobId-validated-temp-grants",
+    "revoke": "preview_revoke_assets-on-overlay-unmount"
+  },
+  "notes": [
+    "preview_allow_assets(jobId) validates completed image job via JobManager, rasterizes TIFF/HEIC (sips/image), copies web-native formats to temp, grants only temps.",
+    "assetProtocol.scope stays empty []; whole-filesystem ** removed.",
+    "ActiveGrant carries grantGeneration; preview_revoke_assets(grantGeneration) no-ops on stale tokens; allow holds grant mutex across prepare_preview_raster."
+  ]
+}

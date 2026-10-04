@@ -11,10 +11,12 @@
 //! - `strip_metadata = false`: keep sensor pixels + copy EXIF (incl. orientation/GPS) on JPEG;
 //!   WebP bakes orientation into pixels (container EXIF not written by the WebP path).
 
-use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, BufWriter, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::codecs::gif::GifDecoder;
 use image::imageops::FilterType;
@@ -111,6 +113,35 @@ fn webp_quality_for_preset(target: ImageEncodeTarget) -> f32 {
     }
 }
 
+/// Monotonic seq so consecutive calls in the same nanosecond never collide
+/// (original + compressed preview temps are created back-to-back).
+static PREVIEW_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Allocate a unique preview temp path by claiming it with `create_new`.
+fn preview_temp_path(ext: &str) -> PathBuf {
+    loop {
+        let seq = PREVIEW_TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "fo-img-preview-{}-{}-{}.{}",
+            std::process::id(),
+            nanos,
+            seq,
+            ext
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return path,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            // Rare: temp dir unwritable etc. — still return a unique name so
+            // callers surface their own write/copy errors.
+            Err(_) => return path,
+        }
+    }
+}
+
 fn decode_heic_to_temp_png(source: &Path) -> Result<PathBuf, String> {
     if !heic_decode_available() {
         return Err(format!(
@@ -127,14 +158,7 @@ fn decode_heic_to_temp_png(source: &Path) -> Result<PathBuf, String> {
         )
     })?;
 
-    let tmp = std::env::temp_dir().join(format!(
-        "fo-heic-{}-{}.png",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
+    let tmp = preview_temp_path("png");
 
     let output = Command::new(&sips)
         .args(["-s", "format", "png"])
@@ -155,6 +179,51 @@ fn decode_heic_to_temp_png(source: &Path) -> Result<PathBuf, String> {
         ));
     }
     Ok(tmp)
+}
+
+fn rasterize_still_to_preview_png(source: &Path) -> Result<PathBuf, String> {
+    let (mut img, orientation, _) = open_image(source)?;
+    img.apply_orientation(orientation);
+    let tmp = preview_temp_path("png");
+    img.save(&tmp)
+        .map_err(|e| format!("preview rasterize failed: {e}"))?;
+    Ok(tmp)
+}
+
+fn copy_to_preview_temp(source: &Path, ext: &str) -> Result<PathBuf, String> {
+    let tmp = preview_temp_path(ext);
+    std::fs::copy(source, &tmp).map_err(|e| format!("preview copy failed: {e}"))?;
+    Ok(tmp)
+}
+
+/// True when a webview `<img>` typically cannot decode the container offline.
+pub fn needs_webview_raster(path: &Path) -> bool {
+    matches!(
+        extension_lower(path).as_str(),
+        "tif" | "tiff" | "heic" | "heif"
+    )
+}
+
+/// Materialize a webview-decodable temp preview (png/jpeg/gif/webp/bmp).
+///
+/// TIFF uses the bundled `image` decoder; HEIC/HEIF uses the macOS `sips` path.
+/// Web-native formats are copied into a temp file so asset grants can be revoked
+/// by deleting the temp (Tauri scope cannot unlist an allow).
+pub fn prepare_preview_raster(source: &Path) -> Result<PathBuf, String> {
+    if !source.is_file() {
+        return Err("preview path is not a readable file".into());
+    }
+    let ext = extension_lower(source);
+    if needs_webview_raster(source) {
+        return match ext.as_str() {
+            "heic" | "heif" => decode_heic_to_temp_png(source),
+            _ => rasterize_still_to_preview_png(source),
+        };
+    }
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" => copy_to_preview_temp(source, &ext),
+        _ => rasterize_still_to_preview_png(source),
+    }
 }
 
 struct GifFrameData {
@@ -633,6 +702,67 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(!out.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_preview_raster_tiff_to_png() {
+        let dir = temp_dir("preview-tiff");
+        let src = dir.join("shot.tiff");
+        write_gradient_tiff(&src, 32, 24);
+        assert!(needs_webview_raster(&src));
+        let preview = prepare_preview_raster(&src).expect("rasterize tiff");
+        assert_ne!(preview, src);
+        assert_eq!(
+            preview.extension().and_then(|e| e.to_str()),
+            Some("png")
+        );
+        assert!(preview.is_file());
+        let decoded = image::open(&preview).expect("open preview png");
+        assert_eq!(decoded.width(), 32);
+        assert_eq!(decoded.height(), 24);
+        let _ = fs::remove_file(&preview);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_preview_raster_copies_png() {
+        let dir = temp_dir("preview-png");
+        let src = dir.join("shot.png");
+        write_gradient_png(&src, 40, 30);
+        assert!(!needs_webview_raster(&src));
+        let preview = prepare_preview_raster(&src).expect("copy png");
+        assert_ne!(preview, src);
+        assert!(preview.is_file());
+        let _ = fs::remove_file(&preview);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preview_temp_path_consecutive_calls_are_unique() {
+        let a = preview_temp_path("png");
+        let b = preview_temp_path("png");
+        assert_ne!(a, b, "original/compressed temps must not share a path");
+        assert!(a.is_file());
+        assert!(b.is_file());
+        let _ = fs::remove_file(&a);
+        let _ = fs::remove_file(&b);
+    }
+
+    #[test]
+    fn prepare_preview_raster_pair_uses_distinct_temps() {
+        let dir = temp_dir("preview-pair");
+        let original = dir.join("orig.png");
+        let compressed = dir.join("out.png");
+        write_gradient_png(&original, 16, 12);
+        write_gradient_png(&compressed, 16, 12);
+        let a = prepare_preview_raster(&original).expect("original temp");
+        let b = prepare_preview_raster(&compressed).expect("compressed temp");
+        assert_ne!(a, b);
+        assert!(a.is_file());
+        assert!(b.is_file());
+        let _ = fs::remove_file(&a);
+        let _ = fs::remove_file(&b);
         let _ = fs::remove_dir_all(&dir);
     }
 

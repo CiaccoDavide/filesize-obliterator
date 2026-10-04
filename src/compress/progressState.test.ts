@@ -191,12 +191,15 @@ describe("applyCompressEvent", () => {
     }
   });
 
-  it("does not let late complete overwrite FAILED or ABORTING", () => {
-    for (const phase of ["FAILED", "ABORTING"] as const) {
+  it("does not let late complete overwrite FAILED or SKIPPED", () => {
+    for (const phase of ["FAILED", "SKIPPED"] as const) {
       const before = row({
         phase,
         percent: 40,
-        error: phase === "FAILED" ? "encoder crashed" : undefined,
+        error:
+          phase === "FAILED"
+            ? "encoder crashed"
+            : "already compressed for this preset",
         outputPath: undefined,
       });
       const rows = applyCompressEvent([before], {
@@ -213,6 +216,27 @@ describe("applyCompressEvent", () => {
         expect(rows[0].error).toBe("encoder crashed");
       }
     }
+  });
+
+  it("lets complete win over ABORTING so cancel race keeps success output", () => {
+    const rows = applyCompressEvent(
+      [row({ phase: "ABORTING", percent: 90 })],
+      {
+        type: "complete",
+        jobId: "job-1",
+        outputPath: "/tmp/a_compressed.stub",
+        originalBytes: 1000,
+        resultBytes: 120,
+        durationMs: 40,
+      },
+    );
+    expect(rows[0]).toMatchObject({
+      phase: "COMPLETE",
+      outputPath: "/tmp/a_compressed.stub",
+      resultBytes: 120,
+      percent: 100,
+    });
+    expect(rows[0].error).toBeUndefined();
   });
 
   it("records output path and size delta fields on complete", () => {
@@ -595,16 +619,20 @@ describe("applyCancelResults", () => {
   });
 
   it("keeps COMPLETE when cancel rejects after the job already finished", () => {
-    const completed = [
-      row({
-        phase: "COMPLETE",
-        percent: 100,
+    // Race: UI marked ABORTING, then Complete arrived (encode finished), then
+    // compress_cancel rejected with "job already finished".
+    const completed = applyCompressEvent(
+      [row({ phase: "ABORTING", percent: 90 })],
+      {
+        type: "complete",
+        jobId: "job-1",
         outputPath: "/tmp/a_compressed.stub",
         originalBytes: 1000,
         resultBytes: 120,
         durationMs: 40,
-      }),
-    ];
+      },
+    );
+    expect(completed[0].phase).toBe("COMPLETE");
 
     const next = applyCancelResults(completed, ["job-1"], [
       {
@@ -617,8 +645,8 @@ describe("applyCancelResults", () => {
       phase: "COMPLETE",
       outputPath: "/tmp/a_compressed.stub",
       resultBytes: 120,
+      error: undefined,
     });
-    expect(next[0].error).toBeUndefined();
     expect(deriveOpsPhase(next)).toBe("COMPLETE");
   });
 
