@@ -69,6 +69,18 @@ Audio is decoded with Symphonia (pure Rust) and re-encoded to MP3 via a vendored
 
 Supported inputs: MP3, WAV, AAC, M4A, FLAC. Job errors distinguish **missing codec** (encoder init failure) from **unsupported or corrupt** input. Work runs on a background Rust thread (UI stays responsive). Outputs land beside the source under `_compressed/`.
 
+## Video compression (offline)
+
+Video is re-encoded locally with **ffmpeg** (H.264 + AAC → `.mp4`). The binary is resolved from `FFMPEG_PATH`, a sidecar next to the app bundle, or `PATH`. Missing ffmpeg fails with a clear **missing tool** error (no network download). Built-in presets:
+
+| Id | Label | Output | Notes |
+|----|-------|--------|-------|
+| `video-high` | High | `.mp4` | CRF 18; quality-first |
+| `video-balanced` | Balanced | `.mp4` | CRF 23, ≤1080p; default tradeoff |
+| `video-small` | Social small | `.mp4` | CRF 28, ≤720p; size-first for sharing |
+
+**Supported input containers:** MP4, WebM, MKV, MOV, M4V (demuxers permitting). AVI/MPEG/WMV are rejected as unsupported in this build. Long encodes emit progress during the run; cancel cooperatively stops ffmpeg. Outputs land beside the source under `_compressed/`; the source file is never modified.
+
 ## Layout
 
 | Path | Role |

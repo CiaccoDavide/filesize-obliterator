@@ -5,6 +5,7 @@ mod output;
 mod presets;
 mod state;
 mod types;
+mod video_encode;
 
 pub use manager::JobManager;
 pub use presets::{all_presets, presets_for_kind, PresetInfo};

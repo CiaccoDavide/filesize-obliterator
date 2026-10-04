@@ -150,10 +150,97 @@ pub fn audio_preset(id: &str) -> Option<&'static AudioPreset> {
     AUDIO_PRESETS.iter().find(|p| p.id == id)
 }
 
-/// All built-in presets (image + audio; video/pdf arrive in later tasks).
+/// Stable video preset ids.
+pub const VIDEO_HIGH: &str = "video-high";
+pub const VIDEO_BALANCED: &str = "video-balanced";
+pub const VIDEO_SMALL: &str = "video-small";
+
+/// H.264 CRF + scale/audio knobs for video presets (ffmpeg libx264 → MP4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoEncodeTarget {
+    /// libx264 CRF (lower = higher quality / larger files).
+    pub crf: u8,
+    /// Max output height in pixels (`-2` width keeps aspect). `None` = no scale.
+    pub max_height: Option<u32>,
+    /// AAC audio bitrate in kbps.
+    pub audio_kbps: u32,
+    /// x264 preset name (`veryfast` / `fast` / `medium`).
+    pub x264_preset: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VideoPreset {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub target: VideoEncodeTarget,
+}
+
+impl VideoPreset {
+    pub fn output_ext(&self) -> &'static str {
+        "mp4"
+    }
+
+    pub fn info(&self) -> PresetInfo {
+        PresetInfo {
+            id: self.id.into(),
+            label: self.label.into(),
+            kind: MediaKind::Video,
+            description: self.description.into(),
+        }
+    }
+}
+
+/// Built-in video presets — social-small / balanced / high via distinct CRF + scale targets.
+const VIDEO_PRESETS: &[VideoPreset] = &[
+    VideoPreset {
+        id: VIDEO_HIGH,
+        label: "High",
+        description: "High-quality H.264 MP4 (CRF 18). Quality-first; may not shrink already-small encodes.",
+        target: VideoEncodeTarget {
+            crf: 18,
+            max_height: None,
+            audio_kbps: 192,
+            x264_preset: "medium",
+        },
+    },
+    VideoPreset {
+        id: VIDEO_BALANCED,
+        label: "Balanced",
+        description: "Balanced H.264 MP4 (CRF 23, ≤1080p). Good quality/size tradeoff for typical clips.",
+        target: VideoEncodeTarget {
+            crf: 23,
+            max_height: Some(1080),
+            audio_kbps: 128,
+            x264_preset: "fast",
+        },
+    },
+    VideoPreset {
+        id: VIDEO_SMALL,
+        label: "Social small",
+        description: "Social-small H.264 MP4 (CRF 28, ≤720p). Prioritizes file size for sharing.",
+        target: VideoEncodeTarget {
+            crf: 28,
+            max_height: Some(720),
+            audio_kbps: 96,
+            x264_preset: "veryfast",
+        },
+    },
+];
+
+pub fn video_presets() -> &'static [VideoPreset] {
+    VIDEO_PRESETS
+}
+
+pub fn video_preset(id: &str) -> Option<&'static VideoPreset> {
+    VIDEO_PRESETS.iter().find(|p| p.id == id)
+}
+
+/// All built-in presets (image + audio + video; pdf arrives in a later task).
 pub fn all_presets() -> Vec<PresetInfo> {
     let mut out: Vec<_> = image_presets().iter().map(ImagePreset::info).collect();
     out.extend(audio_presets().iter().map(AudioPreset::info));
+    out.extend(video_presets().iter().map(VideoPreset::info));
     out
 }
 
@@ -199,10 +286,26 @@ mod tests {
     }
 
     #[test]
-    fn presets_for_kind_filters_image_and_audio() {
+    fn video_registry_has_three_stable_ids() {
+        let ids: Vec<_> = video_presets().iter().map(|p| p.id).collect();
+        assert_eq!(ids, vec![VIDEO_HIGH, VIDEO_BALANCED, VIDEO_SMALL]);
+        for p in video_presets() {
+            assert_eq!(p.info().kind, MediaKind::Video);
+            assert!(!p.label.is_empty());
+            assert!(!p.description.is_empty());
+            assert_eq!(p.output_ext(), "mp4");
+        }
+        assert_eq!(video_preset(VIDEO_HIGH).unwrap().target.crf, 18);
+        assert_eq!(video_preset(VIDEO_BALANCED).unwrap().target.crf, 23);
+        assert_eq!(video_preset(VIDEO_SMALL).unwrap().target.crf, 28);
+        assert_eq!(video_preset(VIDEO_SMALL).unwrap().label, "Social small");
+    }
+
+    #[test]
+    fn presets_for_kind_filters_image_audio_video() {
         assert_eq!(presets_for_kind(&MediaKind::Image).len(), 3);
         assert_eq!(presets_for_kind(&MediaKind::Audio).len(), 3);
-        assert!(presets_for_kind(&MediaKind::Video).is_empty());
+        assert_eq!(presets_for_kind(&MediaKind::Video).len(), 3);
         assert!(presets_for_kind(&MediaKind::Pdf).is_empty());
     }
 
@@ -220,5 +323,11 @@ mod tests {
         assert!(json.contains("\"id\":\"audio-balanced\""));
         assert!(json.contains("\"kind\":\"audio\""));
         assert!(json.contains("\"label\":\"Balanced\""));
+
+        let video = video_preset(VIDEO_SMALL).unwrap().info();
+        let json = serde_json::to_string(&video).expect("ser");
+        assert!(json.contains("\"id\":\"video-small\""));
+        assert!(json.contains("\"kind\":\"video\""));
+        assert!(json.contains("\"label\":\"Social small\""));
     }
 }
