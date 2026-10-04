@@ -10,7 +10,7 @@ use compress::{
 use intake::intake_resolve;
 use preview::{preview_allow_assets, preview_revoke_assets, PreviewGrantState};
 use serde::Serialize;
-use settings::{settings_load, settings_save};
+use settings::{settings_load, settings_save, settings_set_concurrency};
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -51,7 +51,8 @@ pub fn run() {
             preview_allow_assets,
             preview_revoke_assets,
             settings_load,
-            settings_save
+            settings_save,
+            settings_set_concurrency
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

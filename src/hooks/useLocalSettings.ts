@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import type { MediaKind } from "../ipc/compress";
-import { settingsLoad, settingsSave } from "../ipc/settings";
+import {
+  settingsLoad,
+  settingsSave,
+  settingsSetConcurrency,
+} from "../ipc/settings";
 import {
   clampConcurrency,
   defaultSettings,
@@ -15,6 +19,8 @@ const SAVE_DEBOUNCE_MS = 350;
 export type LocalSettingsApi = {
   settings: AppSettings;
   loaded: boolean;
+  /** Terse HUD status when load/save/concurrency apply fails. */
+  status: string | null;
   setConcurrency: (n: number) => void;
   setStripMetadata: (on: boolean) => void;
   setUiDensity: (density: UiDensity) => void;
@@ -26,16 +32,44 @@ function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+function terseError(err: unknown): string {
+  if (err instanceof Error && err.message.trim()) return err.message;
+  const s = String(err ?? "unknown").trim();
+  return s || "unknown";
+}
+
 export function useLocalSettings(): LocalSettingsApi {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [loaded, setLoaded] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSave = useRef<AppSettings | null>(null);
-  /** Bumped on every local edit; in-flight saves only apply when still current. */
+  /** Bumped on every local edit; stale saves must not write disk or clobber UI. */
   const saveGeneration = useRef(0);
+  /** Serialize disk writes so an older in-flight save cannot finish last. */
+  const saveChain = useRef(Promise.resolve());
   const skipNextSave = useRef(true);
+
+  const enqueueSave = useCallback((toSave: AppSettings, generation: number) => {
+    saveChain.current = saveChain.current
+      .catch(() => {
+        // Keep the chain alive after a prior failure.
+      })
+      .then(async () => {
+        if (generation !== saveGeneration.current) return;
+        try {
+          const saved = await settingsSave(toSave);
+          if (generation !== saveGeneration.current) return;
+          setSettings(saved);
+          setStatus(null);
+        } catch (err) {
+          if (generation !== saveGeneration.current) return;
+          setStatus(`SETTINGS SAVE FAILED — ${terseError(err)}`);
+        }
+      });
+  }, []);
 
   const flushSave = useCallback(() => {
     if (saveTimer.current) {
@@ -45,28 +79,24 @@ export function useLocalSettings(): LocalSettingsApi {
     const toSave = pendingSave.current;
     if (!toSave) return;
     pendingSave.current = null;
-    const generation = saveGeneration.current;
-    void settingsSave(toSave).then((saved) => {
-      if (generation !== saveGeneration.current) return;
-      setSettings(saved);
-    });
-  }, []);
+    enqueueSave(toSave, saveGeneration.current);
+  }, [enqueueSave]);
 
-  const scheduleSave = useCallback((next: AppSettings) => {
-    pendingSave.current = next;
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    const generation = saveGeneration.current;
-    saveTimer.current = setTimeout(() => {
-      saveTimer.current = null;
-      const toSave = pendingSave.current;
-      if (!toSave) return;
-      pendingSave.current = null;
-      void settingsSave(toSave).then((saved) => {
-        if (generation !== saveGeneration.current) return;
-        setSettings(saved);
-      });
-    }, SAVE_DEBOUNCE_MS);
-  }, []);
+  const scheduleSave = useCallback(
+    (next: AppSettings) => {
+      pendingSave.current = next;
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      const generation = saveGeneration.current;
+      saveTimer.current = setTimeout(() => {
+        saveTimer.current = null;
+        const toSave = pendingSave.current;
+        if (!toSave) return;
+        pendingSave.current = null;
+        enqueueSave(toSave, generation);
+      }, SAVE_DEBOUNCE_MS);
+    },
+    [enqueueSave],
+  );
 
   const commit = useCallback(
     (updater: (prev: AppSettings) => AppSettings) => {
@@ -85,30 +115,42 @@ export function useLocalSettings(): LocalSettingsApi {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const loadedSettings = await settingsLoad();
-      if (cancelled) return;
-      skipNextSave.current = true;
-      setSettings(loadedSettings);
-      setLoaded(true);
-      // Allow saves after the initial hydration paint.
-      queueMicrotask(() => {
-        skipNextSave.current = false;
-      });
+      try {
+        const loadedSettings = await settingsLoad();
+        if (cancelled) return;
+        skipNextSave.current = true;
+        setSettings(loadedSettings);
+        setLoaded(true);
+        setStatus(null);
+        // Allow saves after the initial hydration paint.
+        queueMicrotask(() => {
+          skipNextSave.current = false;
+        });
 
-      if (loadedSettings.windowSize) {
-        try {
-          await getCurrentWindow().setSize(
-            new LogicalSize(
-              loadedSettings.windowSize.width,
-              loadedSettings.windowSize.height,
-            ),
-          );
-        } catch (err) {
-          // Vite preview has no window host. In Tauri, ACL/runtime failures must surface.
-          if (isTauriRuntime()) {
-            console.error("Failed to restore window size", err);
+        if (loadedSettings.windowSize) {
+          try {
+            await getCurrentWindow().setSize(
+              new LogicalSize(
+                loadedSettings.windowSize.width,
+                loadedSettings.windowSize.height,
+              ),
+            );
+          } catch (err) {
+            // Vite preview has no window host. In Tauri, ACL/runtime failures must surface.
+            if (isTauriRuntime()) {
+              console.error("Failed to restore window size", err);
+            }
           }
         }
+      } catch (err) {
+        if (cancelled) return;
+        skipNextSave.current = true;
+        setSettings(defaultSettings());
+        setLoaded(true);
+        setStatus(`SETTINGS LOAD FAILED — ${terseError(err)}`);
+        queueMicrotask(() => {
+          skipNextSave.current = false;
+        });
       }
     })();
     return () => {
@@ -163,7 +205,18 @@ export function useLocalSettings(): LocalSettingsApi {
 
   const setConcurrency = useCallback(
     (n: number) => {
-      commit((prev) => ({ ...prev, concurrency: clampConcurrency(n) }));
+      const concurrency = clampConcurrency(n);
+      // Apply to JobManager immediately so the next run uses the new cap.
+      void settingsSetConcurrency(concurrency)
+        .then(() => {
+          setStatus((prev) =>
+            prev?.startsWith("CONCURRENCY APPLY FAILED") ? null : prev,
+          );
+        })
+        .catch((err) => {
+          setStatus(`CONCURRENCY APPLY FAILED — ${terseError(err)}`);
+        });
+      commit((prev) => ({ ...prev, concurrency }));
     },
     [commit],
   );
@@ -202,6 +255,7 @@ export function useLocalSettings(): LocalSettingsApi {
   return {
     settings,
     loaded,
+    status,
     setConcurrency,
     setStripMetadata,
     setUiDensity,

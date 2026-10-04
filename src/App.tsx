@@ -209,6 +209,12 @@ function App() {
             </p>
           ) : null}
 
+          {local.status ? (
+            <p className="compress-status tone-danger" role="alert">
+              {local.status}
+            </p>
+          ) : null}
+
           <SettingsPanel
             settings={local.settings}
             disabled={!local.loaded}

@@ -152,18 +152,14 @@ fn write_settings_file(path: &PathBuf, settings: &AppSettings) -> Result<(), Str
 }
 
 #[tauri::command]
-pub fn settings_load(app: AppHandle, manager: tauri::State<'_, JobManager>) -> AppSettings {
-    let path = match settings_path(&app) {
-        Ok(p) => p,
-        Err(_) => {
-            let defaults = AppSettings::default();
-            let _ = manager.set_max_concurrent(defaults.concurrency);
-            return defaults;
-        }
-    };
+pub fn settings_load(
+    app: AppHandle,
+    manager: tauri::State<'_, JobManager>,
+) -> Result<AppSettings, String> {
+    let path = settings_path(&app)?;
     let settings = read_settings_file(&path);
-    let _ = manager.set_max_concurrent(settings.concurrency);
-    settings
+    manager.set_max_concurrent(settings.concurrency)?;
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -189,6 +185,15 @@ pub fn settings_save(
     write_settings_file(&path, &normalized)?;
     manager.set_max_concurrent(normalized.concurrency)?;
     Ok(normalized)
+}
+
+/// Apply concurrency to the job queue immediately (UI change, before debounced save).
+#[tauri::command]
+pub fn settings_set_concurrency(
+    manager: tauri::State<'_, JobManager>,
+    concurrency: usize,
+) -> Result<(), String> {
+    manager.set_max_concurrent(clamp_concurrency(concurrency))
 }
 
 #[cfg(test)]
