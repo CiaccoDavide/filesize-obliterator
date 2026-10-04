@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { CompressProgressPanel } from "./components/CompressProgressPanel";
 import { FileDropZone } from "./components/FileDropZone";
 import { IntakeStatus } from "./components/IntakeStatus";
 import { PresetPicker } from "./components/PresetPicker";
 import { StagedFileList } from "./components/StagedFileList";
-import { useCompressJobs } from "./hooks/useCompressJobs";
+import { useCompressProgress } from "./hooks/useCompressProgress";
 import { useFileIntake } from "./hooks/useFileIntake";
 import { usePresets } from "./hooks/usePresets";
 import type { MediaKind } from "./ipc/compress";
@@ -17,10 +18,18 @@ type AppInfo = {
 };
 
 function statusTone(status: string): "ok" | "warn" | "danger" {
-  if (status.startsWith("REJECTED") || status.startsWith("INTAKE FAILED") || status.startsWith("PICK FAILED")) {
+  if (
+    status.startsWith("REJECTED") ||
+    status.startsWith("INTAKE FAILED") ||
+    status.startsWith("PICK FAILED")
+  ) {
     return "danger";
   }
-  if (status.startsWith("PICK CANCELLED") || status.startsWith("ALREADY") || status.startsWith("NO CHANGE")) {
+  if (
+    status.startsWith("PICK CANCELLED") ||
+    status.startsWith("ALREADY") ||
+    status.startsWith("NO CHANGE")
+  ) {
     return "warn";
   }
   return "ok";
@@ -42,7 +51,7 @@ function App() {
     setKindPreset,
     assignMissingPresets,
   } = useFileIntake(presets.presetByKind);
-  const compress = useCompressJobs();
+  const compress = useCompressProgress();
 
   const presentKinds = useMemo(() => kindsPresent(staged), [staged]);
 
@@ -82,11 +91,6 @@ function App() {
     setKindPreset(kind, presetId);
   }
 
-  const canStart =
-    staged.length > 0 &&
-    staged.every((f) => Boolean(f.presetId)) &&
-    compress.status !== "starting";
-
   return (
     <div className="app-shell">
       <div className="grid-bg" aria-hidden="true" />
@@ -123,38 +127,11 @@ function App() {
             disabled={!presets.loaded}
           />
 
-          <div className="hud-frame compress-panel">
-            <div className="staged-head">
-              <p className="panel-label">Compress</p>
-              <button
-                type="button"
-                className="btn primary"
-                disabled={!canStart}
-                onClick={() => void compress.startStaged(staged, { stripMetadata })}
-              >
-                {compress.status === "starting" ? "Starting" : "Start"}
-              </button>
-            </div>
-            {presets.error ? (
-              <p className="compress-status tone-danger" role="alert">
-                PRESETS FAILED — {presets.error}
-              </p>
-            ) : null}
-            {compress.error ? (
-              <p className="compress-status tone-danger" role="alert">
-                {compress.error}
-              </p>
-            ) : null}
-            {compress.status === "started" ? (
-              <p className="compress-status" role="status">
-                STARTED {compress.jobs.length}
-              </p>
-            ) : (
-              <p className="compress-status">
-                AWAITING START
-              </p>
-            )}
-          </div>
+          {presets.error ? (
+            <p className="compress-status tone-danger" role="alert">
+              PRESETS FAILED — {presets.error}
+            </p>
+          ) : null}
 
           <div className="hud-frame setup-surface">
             <p className="panel-label">Privacy</p>
@@ -174,10 +151,28 @@ function App() {
                 ? "EXIF/GPS removed on image/video outputs."
                 : "Preserve orientation and tags where the pipeline allows."}
             </p>
-            <p className="hud-toggle-hint mono" data-testid="strip-metadata-payload">
+            <p
+              className="hud-toggle-hint mono"
+              data-testid="strip-metadata-payload"
+            >
               compress_start.stripMetadata={String(stripMetadata)}
             </p>
           </div>
+
+          <CompressProgressPanel
+            rows={compress.rows}
+            phase={compress.phase}
+            error={compress.error}
+            starting={compress.starting}
+            canAbort={compress.canAbort}
+            aborting={compress.aborting}
+            stagedCount={staged.length}
+            onStart={() =>
+              void compress.startStaged(staged, { stripMetadata })
+            }
+            onAbort={() => void compress.abortAll()}
+            onClearFinished={compress.clearFinished}
+          />
 
           <div className="hud-frame setup-surface">
             <p className="panel-label">Bridge</p>
