@@ -152,6 +152,10 @@ function isTerminalPhase(phase: OpsPhase): boolean {
   return phase === "COMPLETE" || phase === "FAILED";
 }
 
+function rejectMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
+}
+
 /** Apply compress_cancel PromiseSettled results — never leave rows stuck in ABORTING. */
 export function applyCancelResults(
   rows: ProgressRow[],
@@ -170,13 +174,29 @@ export function applyCancelResults(
       // Cancel often rejects with "job already finished" after Complete/Failed;
       // do not clobber a correct terminal phase.
       if (existing && isTerminalPhase(existing.phase)) continue;
-      const reason = result.reason;
-      const message =
-        reason instanceof Error ? reason.message : String(reason);
-      next = markFailed(next, id, message);
+      next = markFailed(next, id, rejectMessage(result.reason));
     }
   }
   return next;
+}
+
+/**
+ * Surface error for abortAll: only real cancel failures on still-active/ABORTING
+ * rows. Ignore "job already finished" (and similar) when the row is already terminal.
+ */
+export function abortSurfaceErrorFromCancelResults(
+  rows: ProgressRow[],
+  ids: string[],
+  results: PromiseSettledResult<JobInfo>[],
+): string | null {
+  for (let i = 0; i < ids.length; i++) {
+    const result = results[i];
+    if (!result || result.status !== "rejected") continue;
+    const existing = rows.find((r) => r.jobId === ids[i]);
+    if (existing && isTerminalPhase(existing.phase)) continue;
+    return rejectMessage(result.reason);
+  }
+  return null;
 }
 
 export function applyCompressEvent(

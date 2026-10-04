@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  abortSurfaceErrorFromCancelResults,
   activeJobIds,
   applyCancelResults,
   applyCompressEvent,
@@ -88,14 +89,12 @@ export function useCompressProgress() {
     const results = await Promise.allSettled(
       ids.map((id) => compressCancel(id)),
     );
-    setRows((prev) => applyCancelResults(prev, ids, results));
-    const firstReject = results.find(
-      (r): r is PromiseRejectedResult => r.status === "rejected",
-    );
-    if (firstReject) {
-      const reason = firstReject.reason;
-      setError(reason instanceof Error ? reason.message : String(reason));
-    }
+    let surfaceError: string | null = null;
+    setRows((prev) => {
+      surfaceError = abortSurfaceErrorFromCancelResults(prev, ids, results);
+      return applyCancelResults(prev, ids, results);
+    });
+    if (surfaceError) setError(surfaceError);
   }, [rows]);
 
   const clearFinished = useCallback(() => {

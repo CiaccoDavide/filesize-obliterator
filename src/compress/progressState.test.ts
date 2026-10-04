@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { JobInfo } from "../ipc/compress";
 import {
+  abortSurfaceErrorFromCancelResults,
   activeJobIds,
   applyCancelResults,
   applyCompressEvent,
@@ -336,6 +337,32 @@ describe("applyCancelResults", () => {
       phase: "FAILED",
       error: "encoder crashed",
     });
+  });
+});
+
+describe("abortSurfaceErrorFromCancelResults", () => {
+  it("ignores job-already-finished reject when row is already COMPLETE", () => {
+    const completed = [row({ phase: "COMPLETE", outputPath: "/tmp/out.stub" })];
+    const error = abortSurfaceErrorFromCancelResults(completed, ["job-1"], [
+      { status: "rejected", reason: new Error("job already finished") },
+    ]);
+    expect(error).toBeNull();
+  });
+
+  it("ignores job-already-finished reject when row is already FAILED", () => {
+    const failed = [row({ phase: "FAILED", error: "encoder crashed" })];
+    const error = abortSurfaceErrorFromCancelResults(failed, ["job-1"], [
+      { status: "rejected", reason: new Error("job already finished") },
+    ]);
+    expect(error).toBeNull();
+  });
+
+  it("surfaces cancel reject for still-ABORTING rows", () => {
+    const aborting = [row({ phase: "ABORTING" })];
+    const error = abortSurfaceErrorFromCancelResults(aborting, ["job-1"], [
+      { status: "rejected", reason: new Error("ipc down") },
+    ]);
+    expect(error).toBe("ipc down");
   });
 });
 
