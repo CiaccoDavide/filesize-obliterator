@@ -1,11 +1,14 @@
 import { formatBytes } from "../intake/formatBytes";
 import type { StagedFile } from "../intake/types";
+import type { RevealAction } from "../reveal/actions";
+import { RevealRowActions } from "./RevealRowActions";
 
 type Props = {
   files: StagedFile[];
+  onReveal?: (action: RevealAction, targets: { sourcePath: string }) => void;
 };
 
-export function StagedFileList({ files }: Props) {
+export function StagedFileList({ files, onReveal }: Props) {
   if (files.length === 0) {
     return (
       <p className="staged-empty mono">No files staged.</p>
@@ -24,6 +27,15 @@ export function StagedFileList({ files }: Props) {
             {file.presetId || "—"}
           </span>
           <span className="staged-size mono">{formatBytes(file.bytes)}</span>
+          {onReveal ? (
+            <RevealRowActions
+              targets={{ sourcePath: file.path }}
+              showOutput={false}
+              onReveal={(action) =>
+                onReveal(action, { sourcePath: file.path })
+              }
+            />
+          ) : null}
         </li>
       ))}
     </ul>
