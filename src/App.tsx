@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { CompressProgressPanel } from "./components/CompressProgressPanel";
+import { EstimateSummaryStrip } from "./components/EstimateSummaryStrip";
 import { FileDropZone } from "./components/FileDropZone";
 import { IntakeStatus } from "./components/IntakeStatus";
 import { PresetPicker } from "./components/PresetPicker";
 import { StagedFileList } from "./components/StagedFileList";
+import { useCompressEstimate } from "./hooks/useCompressEstimate";
 import { useCompressProgress } from "./hooks/useCompressProgress";
 import { useFileIntake } from "./hooks/useFileIntake";
 import { usePresets } from "./hooks/usePresets";
@@ -59,8 +61,19 @@ function App() {
     assignMissingPresets,
   } = useFileIntake(presets.presetByKind);
   const compress = useCompressProgress();
+  const estimate = useCompressEstimate();
 
   const presentKinds = useMemo(() => kindsPresent(staged), [staged]);
+
+  const estimateInputKey = useMemo(
+    () => staged.map((f) => `${f.path}\0${f.presetId}\0${f.bytes}`).join("\n"),
+    [staged],
+  );
+
+  // Drop stale PREVIEW numbers when staged files or their presets change.
+  useEffect(() => {
+    estimate.clearEstimates();
+  }, [estimateInputKey, estimate.clearEstimates]);
 
   useEffect(() => {
     if (!presets.loaded) return;
@@ -94,8 +107,14 @@ function App() {
   }, []);
 
   function handlePresetSelect(kind: MediaKind, presetId: string) {
+    // Clear before paint so summary/rows never briefly show the prior preset.
+    estimate.clearEstimates();
     presets.setKindPreset(kind, presetId);
     setKindPreset(kind, presetId);
+  }
+
+  function handleClearStaged() {
+    clearStaged();
   }
 
   const handleReveal = useCallback(
@@ -128,17 +147,24 @@ function App() {
               <div className="staged-head">
                 <p className="panel-label">Staged</p>
                 {staged.length > 0 ? (
-                  <button type="button" className="btn" onClick={clearStaged}>
+                  <button type="button" className="btn" onClick={handleClearStaged}>
                     Clear
                   </button>
                 ) : null}
               </div>
               <StagedFileList
                 files={staged}
+                estimatesByPath={estimate.byPath}
                 onReveal={(action, targets) => void handleReveal(action, targets)}
               />
             </div>
           </FileDropZone>
+
+          <EstimateSummaryStrip
+            summary={estimate.summary}
+            estimating={estimate.estimating}
+            error={estimate.error}
+          />
 
           <PresetPicker
             kinds={presentKinds}
@@ -210,6 +236,8 @@ function App() {
             canAbort={compress.canAbort}
             aborting={compress.aborting}
             stagedCount={staged.length}
+            estimating={estimate.estimating}
+            onPreview={() => void estimate.previewStaged(staged)}
             onStart={() =>
               void compress.startStaged(staged, {
                 stripMetadata,

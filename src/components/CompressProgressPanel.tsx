@@ -21,7 +21,9 @@ type Props = {
   canAbort: boolean;
   aborting: boolean;
   stagedCount: number;
+  estimating?: boolean;
   onStart: () => void;
+  onPreview?: () => void;
   onAbort: () => void;
   onCancelOne: (jobId: string) => void;
   onClearFinished: () => void;
@@ -73,7 +75,9 @@ export function CompressProgressPanel({
   canAbort,
   aborting,
   stagedCount,
+  estimating = false,
   onStart,
+  onPreview,
   onAbort,
   onCancelOne,
   onClearFinished,
@@ -141,6 +145,18 @@ export function CompressProgressPanel({
         </div>
 
         <div className="compress-actions">
+          {onPreview ? (
+            <button
+              type="button"
+              className="btn"
+              disabled={
+                estimating || starting || stagedCount === 0 || canAbort
+              }
+              onClick={onPreview}
+            >
+              {estimating ? "ESTIMATING" : "PREVIEW"}
+            </button>
+          ) : null}
           <button
             type="button"
             className="btn primary"
