@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { CompressProgressPanel } from "./components/CompressProgressPanel";
 import { EstimateSummaryStrip } from "./components/EstimateSummaryStrip";
@@ -8,6 +8,7 @@ import {
   type ImageCompareTarget,
 } from "./components/ImageComparePreview";
 import { IntakeStatus } from "./components/IntakeStatus";
+import { KeyboardHelpOverlay } from "./components/KeyboardHelpOverlay";
 import { PresetPicker } from "./components/PresetPicker";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { StagedFileList } from "./components/StagedFileList";
@@ -19,6 +20,7 @@ import { useLocalSettings } from "./hooks/useLocalSettings";
 import { usePresets } from "./hooks/usePresets";
 import type { MediaKind } from "./ipc/compress";
 import { revealInFileManager } from "./ipc/reveal";
+import { useKeyboardShortcuts } from "./keyboard/useKeyboardShortcuts";
 import type { RevealAction } from "./reveal/actions";
 import { kindsPresent } from "./presets/selection";
 import "./App.css";
@@ -57,6 +59,9 @@ function App() {
   );
   /** When on, re-encode even if source+preset already has a `_compressed` output. */
   const [forceReencode, setForceReencode] = useState(false);
+  const [keysOpen, setKeysOpen] = useState(false);
+  const dropZoneRef = useRef<HTMLDivElement>(null);
+  const settingsRef = useRef<HTMLDivElement>(null);
   const local = useLocalSettings();
   const presets = usePresets({
     preferredDefaults: local.settings.defaultPresets,
@@ -74,6 +79,56 @@ function App() {
   } = useFileIntake(presets.presetByKind);
   const compress = useCompressProgress();
   const estimate = useCompressEstimate();
+
+  const focusDropZone = useCallback(() => {
+    dropZoneRef.current?.focus();
+    dropZoneRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, []);
+
+  const openSettings = useCallback(() => {
+    const el = settingsRef.current;
+    if (!el) return;
+    el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    el.focus();
+  }, []);
+
+  const shortcutHandlers = useMemo(
+    () => ({
+      pickFiles: () => {
+        void pickFiles();
+      },
+      startCompress: () => {
+        if (compress.canAbort || compress.starting || staged.length === 0) return;
+        void compress.startStaged(staged, {
+          stripMetadata: local.settings.stripMetadata,
+          force: forceReencode,
+        });
+      },
+      abortAll: () => {
+        void compress.abortAll();
+      },
+      clearFinished: () => {
+        compress.clearFinished();
+      },
+      focusDropZone,
+      openSettings,
+      toggleHelp: () => setKeysOpen((v) => !v),
+    }),
+    [
+      pickFiles,
+      compress,
+      staged,
+      local.settings.stripMetadata,
+      forceReencode,
+      focusDropZone,
+      openSettings,
+    ],
+  );
+
+  useKeyboardShortcuts(shortcutHandlers, {
+    canAbort: compress.canAbort,
+    helpOpen: keysOpen,
+  });
 
   const presentKinds = useMemo(() => kindsPresent(staged), [staged]);
 
@@ -168,9 +223,22 @@ function App() {
             <p className="brand-sub">
               Instrument panel for shrinking files on this machine. No cloud.
             </p>
+            <p className="keys-hint mono">
+              <button
+                type="button"
+                className="btn keys-hint-btn"
+                onClick={() => setKeysOpen(true)}
+              >
+                KEYS ?
+              </button>
+            </p>
           </header>
 
-          <FileDropZone dragActive={dragActive} onPick={() => void pickFiles()}>
+          <FileDropZone
+            ref={dropZoneRef}
+            dragActive={dragActive}
+            onPick={() => void pickFiles()}
+          >
             <IntakeStatus status={status} tone={statusTone(status)} />
             <div className="staged-panel">
               <div className="staged-head">
@@ -215,13 +283,20 @@ function App() {
             </p>
           ) : null}
 
-          <SettingsPanel
-            settings={local.settings}
-            disabled={!local.loaded}
-            onConcurrency={local.setConcurrency}
-            onStripMetadata={local.setStripMetadata}
-            onUiDensity={local.setUiDensity}
-          />
+          <div
+            ref={settingsRef}
+            tabIndex={-1}
+            className="settings-focus-target"
+            data-settings-focus
+          >
+            <SettingsPanel
+              settings={local.settings}
+              disabled={!local.loaded}
+              onConcurrency={local.setConcurrency}
+              onStripMetadata={local.setStripMetadata}
+              onUiDensity={local.setUiDensity}
+            />
+          </div>
 
           <div className="hud-frame setup-surface">
             <p className="panel-label">Session</p>
@@ -308,6 +383,10 @@ function App() {
           onClose={() => setImagePreview(null)}
         />
       ) : null}
+      <KeyboardHelpOverlay
+        open={keysOpen}
+        onClose={() => setKeysOpen(false)}
+      />
     </div>
   );
 }
