@@ -115,16 +115,19 @@ impl WatchState {
             .ok_or_else(|| format!("{}: non-utf8 path", root.display()))?
             .to_string();
 
+        // Seed ignores before spawning so include_existing=false cannot be
+        // silently violated when the initial listing fails.
+        let ignore_existing = seed_ignore_paths(&root, request.include_existing)?;
+
         // Replace any prior watch.
         let _ = self.stop_internal();
 
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
         let root_thread = root.clone();
-        let include_existing = request.include_existing;
 
         let join = thread::spawn(move || {
-            run_watch_loop(app, root_thread, include_existing, stop_thread);
+            run_watch_loop(app, root_thread, ignore_existing, stop_thread);
         });
 
         {
@@ -153,6 +156,25 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Paths to ignore at watch start when `include_existing` is false.
+/// Fails the start if the directory cannot be listed — an empty ignore set
+/// would treat every pre-existing supported file as new after debounce.
+fn seed_ignore_paths(root: &Path, include_existing: bool) -> Result<Vec<String>, String> {
+    if include_existing {
+        return Ok(Vec::new());
+    }
+    let files = list_immediate_files(root).map_err(|e| {
+        format!(
+            "{}: cannot list folder to exclude existing files: {e}",
+            root.display()
+        )
+    })?;
+    Ok(files
+        .into_iter()
+        .filter_map(|p| p.to_str().map(|s| s.to_string()))
+        .collect())
+}
+
 fn emit(app: &AppHandle, event: WatchEvent) {
     let _ = app.emit(WATCH_EVENT, event);
 }
@@ -160,7 +182,7 @@ fn emit(app: &AppHandle, event: WatchEvent) {
 fn run_watch_loop(
     app: AppHandle,
     root: PathBuf,
-    include_existing: bool,
+    ignore_existing: Vec<String>,
     stop: Arc<AtomicBool>,
 ) {
     let root_display = root.to_string_lossy().into_owned();
@@ -172,15 +194,7 @@ fn run_watch_loop(
     );
 
     let mut tracker = SizeStableTracker::new(Duration::from_millis(DEFAULT_STABLE_MS));
-    if !include_existing {
-        if let Ok(files) = list_immediate_files(&root) {
-            let existing: Vec<String> = files
-                .into_iter()
-                .filter_map(|p| p.to_str().map(|s| s.to_string()))
-                .collect();
-            tracker.ignore_existing(existing);
-        }
-    }
+    tracker.ignore_existing(ignore_existing);
 
     while !stop.load(Ordering::SeqCst) {
         poll_once(&app, &root, &mut tracker);
@@ -280,6 +294,36 @@ mod tests {
         let req: WatchStartRequest = serde_json::from_str(raw).unwrap();
         assert_eq!(req.path, "/tmp/inbox");
         assert!(!req.include_existing);
+    }
+
+    #[test]
+    fn seed_ignore_paths_lists_existing_when_include_existing_false() {
+        let dir = temp_dir("seed-ok");
+        let photo = dir.join("a.jpg");
+        fs::File::create(&photo)
+            .unwrap()
+            .write_all(b"x")
+            .unwrap();
+        let seeded = seed_ignore_paths(&dir, false).expect("list ok");
+        assert!(seeded.iter().any(|p| p.ends_with("a.jpg")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_ignore_paths_skips_listing_when_include_existing_true() {
+        let missing = PathBuf::from("/no/such/watch/seed/dir-include-true");
+        let seeded = seed_ignore_paths(&missing, true).expect("no list needed");
+        assert!(seeded.is_empty());
+    }
+
+    #[test]
+    fn seed_ignore_paths_fails_start_when_listing_fails() {
+        let missing = PathBuf::from("/no/such/watch/seed/dir-missing");
+        let err = seed_ignore_paths(&missing, false).expect_err("missing dir");
+        assert!(
+            err.contains("cannot list folder to exclude existing files"),
+            "unexpected err: {err}"
+        );
     }
 
     #[test]

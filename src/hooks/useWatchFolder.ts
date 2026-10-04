@@ -6,6 +6,7 @@ import {
   watchStop,
   type WatchEvent,
 } from "../ipc/watch";
+import { createWatchReadyGate } from "../watch/readyGate";
 import { watchHudStatus } from "../watch/status";
 
 export type WatchReadyFile = {
@@ -30,12 +31,16 @@ export function useWatchFolder(options: Options = {}) {
   onReadyRef.current = onReady;
   const includeExistingRef = useRef(includeExisting);
   includeExistingRef.current = includeExisting;
+  const readyGateRef = useRef(createWatchReadyGate());
 
   const [watching, setWatching] = useState(false);
   const [path, setPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const stop = useCallback(async () => {
+    // Disarm before join so a Ready already queued on the event channel
+    // cannot call onReady after the operator disables watch.
+    readyGateRef.current.disarm();
     try {
       await watchStop();
     } catch {
@@ -52,9 +57,11 @@ export function useWatchFolder(options: Options = {}) {
         path: dir,
         includeExisting: includeExistingRef.current,
       });
+      readyGateRef.current.arm();
       setWatching(status.watching);
       setPath(status.path ?? dir);
     } catch (err: unknown) {
+      readyGateRef.current.disarm();
       const message = err instanceof Error ? err.message : String(err);
       setError(`WATCH FAILED — ${message}`);
       setWatching(false);
@@ -88,22 +95,26 @@ export function useWatchFolder(options: Options = {}) {
   useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
+    const gate = readyGateRef.current;
 
     async function bind() {
       try {
         unlisten = await listenWatchEvents((event: WatchEvent) => {
           if (cancelled) return;
           if (event.type === "started") {
+            gate.arm();
             setWatching(true);
             setPath(event.path);
             return;
           }
           if (event.type === "stopped") {
+            gate.disarm();
             setWatching(false);
             setPath(null);
             return;
           }
           if (event.type === "ready") {
+            if (!gate.shouldHandleReady()) return;
             onReadyRef.current?.({ path: event.path, bytes: event.bytes });
           }
         });
@@ -115,6 +126,7 @@ export function useWatchFolder(options: Options = {}) {
     void bind();
     return () => {
       cancelled = true;
+      gate.disarm();
       unlisten?.();
       void watchStop().catch(() => {
         /* quit / unmount */
