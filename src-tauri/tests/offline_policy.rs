@@ -254,3 +254,34 @@ fn readme_states_offline_only_constraint() {
         "README must document the offline-only product constraint"
     );
 }
+
+
+#[test]
+fn settings_persist_locally_without_network_plugins() {
+    let cargo = read_to_string(&repo_root().join("src-tauri/Cargo.toml"));
+    assert!(
+        !cargo.contains("tauri-plugin-http")
+            && !cargo.contains("reqwest")
+            && !cargo.contains("ureq"),
+        "settings must not pull in HTTP client crates"
+    );
+    let settings = read_to_string(&repo_root().join("src-tauri/src/settings.rs"));
+    assert!(
+        settings.contains("app_config_dir") || settings.contains("SETTINGS_FILE_NAME"),
+        "settings module must write to the local app config dir"
+    );
+    assert!(
+        !settings.contains("http://") && !settings.contains("https://"),
+        "settings.rs must not reference remote URLs"
+    );
+    let package = parse_json(&repo_root().join("package.json"));
+    let deps = package
+        .get("dependencies")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !deps.keys().any(|k| k.contains("plugin-http") || k.contains("plugin-updater")),
+        "frontend must not add network plugins for settings sync"
+    );
+}

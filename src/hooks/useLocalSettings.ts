@@ -1,0 +1,170 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+import type { MediaKind } from "../ipc/compress";
+import { settingsLoad, settingsSave } from "../ipc/settings";
+import {
+  clampConcurrency,
+  defaultSettings,
+  type AppSettings,
+  type UiDensity,
+  type WindowSize,
+} from "../settings/schema";
+
+const SAVE_DEBOUNCE_MS = 350;
+
+export type LocalSettingsApi = {
+  settings: AppSettings;
+  loaded: boolean;
+  setConcurrency: (n: number) => void;
+  setStripMetadata: (on: boolean) => void;
+  setUiDensity: (density: UiDensity) => void;
+  setDefaultPreset: (kind: MediaKind, presetId: string) => void;
+  patch: (partial: Partial<AppSettings>) => void;
+};
+
+export function useLocalSettings(): LocalSettingsApi {
+  const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [loaded, setLoaded] = useState(false);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skipNextSave = useRef(true);
+
+  const scheduleSave = useCallback((next: AppSettings) => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      void settingsSave(next).then((saved) => {
+        setSettings(saved);
+      });
+    }, SAVE_DEBOUNCE_MS);
+  }, []);
+
+  const commit = useCallback(
+    (updater: (prev: AppSettings) => AppSettings) => {
+      setSettings((prev) => {
+        const next = updater(prev);
+        if (!skipNextSave.current) {
+          scheduleSave(next);
+        }
+        return next;
+      });
+    },
+    [scheduleSave],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const loadedSettings = await settingsLoad();
+      if (cancelled) return;
+      skipNextSave.current = true;
+      setSettings(loadedSettings);
+      setLoaded(true);
+      // Allow saves after the initial hydration paint.
+      queueMicrotask(() => {
+        skipNextSave.current = false;
+      });
+
+      if (loadedSettings.windowSize) {
+        try {
+          await getCurrentWindow().setSize(
+            new LogicalSize(
+              loadedSettings.windowSize.width,
+              loadedSettings.windowSize.height,
+            ),
+          );
+        } catch {
+          // Browser / non-Tauri preview — ignore.
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+    void (async () => {
+      try {
+        const win = getCurrentWindow();
+        unlisten = await win.onResized(({ payload }) => {
+          if (resizeTimer) clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(() => {
+            void (async () => {
+              try {
+                const factor = await win.scaleFactor();
+                const size: WindowSize = {
+                  width: Math.round(payload.width / factor),
+                  height: Math.round(payload.height / factor),
+                };
+                if (size.width < 400 || size.height < 400) return;
+                commit((prev) => ({ ...prev, windowSize: size }));
+              } catch {
+                // ignore
+              }
+            })();
+          }, 500);
+        });
+      } catch {
+        // non-Tauri
+      }
+    })();
+
+    return () => {
+      unlisten?.();
+      if (resizeTimer) clearTimeout(resizeTimer);
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+    };
+  }, [commit]);
+
+  const setConcurrency = useCallback(
+    (n: number) => {
+      commit((prev) => ({ ...prev, concurrency: clampConcurrency(n) }));
+    },
+    [commit],
+  );
+
+  const setStripMetadata = useCallback(
+    (on: boolean) => {
+      commit((prev) => ({ ...prev, stripMetadata: on }));
+    },
+    [commit],
+  );
+
+  const setUiDensity = useCallback(
+    (density: UiDensity) => {
+      commit((prev) => ({ ...prev, uiDensity: density }));
+    },
+    [commit],
+  );
+
+  const setDefaultPreset = useCallback(
+    (kind: MediaKind, presetId: string) => {
+      commit((prev) => ({
+        ...prev,
+        defaultPresets: { ...prev.defaultPresets, [kind]: presetId },
+      }));
+    },
+    [commit],
+  );
+
+  const patch = useCallback(
+    (partial: Partial<AppSettings>) => {
+      commit((prev) => ({ ...prev, ...partial }));
+    },
+    [commit],
+  );
+
+  return {
+    settings,
+    loaded,
+    setConcurrency,
+    setStripMetadata,
+    setUiDensity,
+    setDefaultPreset,
+    patch,
+  };
+}

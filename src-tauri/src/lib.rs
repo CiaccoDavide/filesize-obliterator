@@ -1,6 +1,7 @@
 mod compress;
 mod intake;
 mod preview;
+mod settings;
 
 use compress::{
     compress_cancel, compress_estimate, compress_list, compress_list_presets, compress_start,
@@ -9,6 +10,7 @@ use compress::{
 use intake::intake_resolve;
 use preview::{preview_allow_assets, preview_revoke_assets, PreviewGrantState};
 use serde::Serialize;
+use settings::{settings_load, settings_save};
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -47,7 +49,9 @@ pub fn run() {
             compress_estimate,
             intake_resolve,
             preview_allow_assets,
-            preview_revoke_assets
+            preview_revoke_assets,
+            settings_load,
+            settings_save
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
