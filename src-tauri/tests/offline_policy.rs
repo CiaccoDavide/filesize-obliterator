@@ -156,6 +156,22 @@ fn capabilities_do_not_grant_http_client() {
     }
 }
 
+/// Window size restore uses `setSize`; `core:window:default` does not include it.
+#[test]
+fn capabilities_grant_window_set_size() {
+    let caps = parse_json(&repo_root().join("src-tauri/capabilities/default.json"));
+    let permissions = caps
+        .get("permissions")
+        .and_then(|v| v.as_array())
+        .expect("capabilities.default.permissions must be an array");
+    assert!(
+        permissions
+            .iter()
+            .any(|perm| permission_identifier(perm) == Some("core:window:allow-set-size")),
+        "capabilities must grant core:window:allow-set-size for settings window restore"
+    );
+}
+
 /// `openPath` denies when the allow list is empty — OPEN _COMPRESSED needs a path scope.
 #[test]
 fn opener_allow_open_path_has_path_allow_scope() {

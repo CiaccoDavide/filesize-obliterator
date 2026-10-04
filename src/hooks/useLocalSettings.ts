@@ -22,18 +22,47 @@ export type LocalSettingsApi = {
   patch: (partial: Partial<AppSettings>) => void;
 };
 
+function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
 export function useLocalSettings(): LocalSettingsApi {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [loaded, setLoaded] = useState(false);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingSave = useRef<AppSettings | null>(null);
+  /** Bumped on every local edit; in-flight saves only apply when still current. */
+  const saveGeneration = useRef(0);
   const skipNextSave = useRef(true);
 
+  const flushSave = useCallback(() => {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    const toSave = pendingSave.current;
+    if (!toSave) return;
+    pendingSave.current = null;
+    const generation = saveGeneration.current;
+    void settingsSave(toSave).then((saved) => {
+      if (generation !== saveGeneration.current) return;
+      setSettings(saved);
+    });
+  }, []);
+
   const scheduleSave = useCallback((next: AppSettings) => {
+    pendingSave.current = next;
     if (saveTimer.current) clearTimeout(saveTimer.current);
+    const generation = saveGeneration.current;
     saveTimer.current = setTimeout(() => {
-      void settingsSave(next).then((saved) => {
+      saveTimer.current = null;
+      const toSave = pendingSave.current;
+      if (!toSave) return;
+      pendingSave.current = null;
+      void settingsSave(toSave).then((saved) => {
+        if (generation !== saveGeneration.current) return;
         setSettings(saved);
       });
     }, SAVE_DEBOUNCE_MS);
@@ -44,6 +73,7 @@ export function useLocalSettings(): LocalSettingsApi {
       setSettings((prev) => {
         const next = updater(prev);
         if (!skipNextSave.current) {
+          saveGeneration.current += 1;
           scheduleSave(next);
         }
         return next;
@@ -73,8 +103,11 @@ export function useLocalSettings(): LocalSettingsApi {
               loadedSettings.windowSize.height,
             ),
           );
-        } catch {
-          // Browser / non-Tauri preview — ignore.
+        } catch (err) {
+          // Vite preview has no window host. In Tauri, ACL/runtime failures must surface.
+          if (isTauriRuntime()) {
+            console.error("Failed to restore window size", err);
+          }
         }
       }
     })();
@@ -113,12 +146,20 @@ export function useLocalSettings(): LocalSettingsApi {
       }
     })();
 
+    const onHidden = () => {
+      if (document.visibilityState === "hidden") flushSave();
+    };
+    document.addEventListener("visibilitychange", onHidden);
+    window.addEventListener("pagehide", flushSave);
+
     return () => {
       unlisten?.();
       if (resizeTimer) clearTimeout(resizeTimer);
-      if (saveTimer.current) clearTimeout(saveTimer.current);
+      document.removeEventListener("visibilitychange", onHidden);
+      window.removeEventListener("pagehide", flushSave);
+      flushSave();
     };
-  }, [commit]);
+  }, [commit, flushSave]);
 
   const setConcurrency = useCallback(
     (n: number) => {
