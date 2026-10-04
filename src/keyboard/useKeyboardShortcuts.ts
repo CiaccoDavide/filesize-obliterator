@@ -16,6 +16,8 @@ type Options = {
   helpOpen: boolean;
   /** Image compare preview open — Escape dismisses it (component-owned); no abort. */
   previewOpen: boolean;
+  /** First-run / HELP briefing open — Escape acknowledges (component-owned); no abort. */
+  briefingOpen?: boolean;
   enabled?: boolean;
 };
 
@@ -25,7 +27,13 @@ type Options = {
  */
 export function useKeyboardShortcuts(
   handlers: ShortcutHandlers,
-  { canAbort, helpOpen, previewOpen, enabled = true }: Options,
+  {
+    canAbort,
+    helpOpen,
+    previewOpen,
+    briefingOpen = false,
+    enabled = true,
+  }: Options,
 ): void {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
@@ -66,6 +74,7 @@ export function useKeyboardShortcuts(
         canAbort,
         helpOpen,
         previewOpen,
+        briefingOpen,
       });
       if (action === "ignore") return;
 
@@ -80,5 +89,5 @@ export function useKeyboardShortcuts(
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [canAbort, helpOpen, previewOpen, enabled]);
+  }, [canAbort, helpOpen, previewOpen, briefingOpen, enabled]);
 }

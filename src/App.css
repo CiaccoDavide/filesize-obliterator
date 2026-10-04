@@ -793,10 +793,47 @@
 /* Keyboard shortcuts KEYS overlay (issue #26) */
 .keys-hint {
   margin: 0.55rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
 }
 
 .keys-hint-btn {
   letter-spacing: 0.14em;
+}
+
+/* First-run / HELP briefing (issue #30) — reuses preview-overlay chrome */
+.briefing-panel {
+  width: min(480px, 100%);
+  max-height: min(92vh, 640px);
+}
+
+.briefing-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.briefing-step {
+  display: grid;
+  grid-template-columns: 1.5rem 1fr;
+  gap: 0.65rem;
+  align-items: baseline;
+  font-size: 0.72rem;
+  color: var(--ice);
+}
+
+.briefing-index {
+  color: var(--accent);
+  letter-spacing: 0.08em;
+}
+
+.briefing-copy {
+  color: var(--ice);
+  line-height: 1.45;
 }
 
 .settings-focus-target {

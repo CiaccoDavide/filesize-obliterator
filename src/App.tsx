@@ -8,10 +8,12 @@ import {
   type ImageCompareTarget,
 } from "./components/ImageComparePreview";
 import { IntakeStatus } from "./components/IntakeStatus";
+import { BriefingOverlay } from "./components/BriefingOverlay";
 import { KeyboardHelpOverlay } from "./components/KeyboardHelpOverlay";
 import { PresetPicker } from "./components/PresetPicker";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { StagedFileList } from "./components/StagedFileList";
+import { isBriefingOpen } from "./briefing/briefing";
 import type { ProgressRow } from "./compress/progressState";
 import { useCompressEstimate } from "./hooks/useCompressEstimate";
 import { useCompressProgress } from "./hooks/useCompressProgress";
@@ -60,6 +62,8 @@ function App() {
   /** When on, re-encode even if source+preset already has a `_compressed` output. */
   const [forceReencode, setForceReencode] = useState(false);
   const [keysOpen, setKeysOpen] = useState(false);
+  /** Operator reopened BRIEFING after ACK (does not clear briefingSeen). */
+  const [briefingHelpRequested, setBriefingHelpRequested] = useState(false);
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
   const local = useLocalSettings();
@@ -125,10 +129,24 @@ function App() {
     ],
   );
 
+  const briefingOpen = isBriefingOpen({
+    settingsLoaded: local.loaded,
+    briefingSeen: local.settings.briefingSeen,
+    helpRequested: briefingHelpRequested,
+  });
+
+  const acknowledgeBriefing = useCallback(() => {
+    setBriefingHelpRequested(false);
+    if (!local.settings.briefingSeen) {
+      local.patch({ briefingSeen: true });
+    }
+  }, [local.patch, local.settings.briefingSeen]);
+
   useKeyboardShortcuts(shortcutHandlers, {
     canAbort: compress.canAbort,
     helpOpen: keysOpen,
     previewOpen: imagePreview != null,
+    briefingOpen,
   });
 
   const presentKinds = useMemo(() => kindsPresent(staged), [staged]);
@@ -225,6 +243,13 @@ function App() {
               Instrument panel for shrinking files on this machine. No cloud.
             </p>
             <p className="keys-hint mono">
+              <button
+                type="button"
+                className="btn keys-hint-btn"
+                onClick={() => setBriefingHelpRequested(true)}
+              >
+                BRIEFING
+              </button>
               <button
                 type="button"
                 className="btn keys-hint-btn"
@@ -384,6 +409,7 @@ function App() {
           onClose={() => setImagePreview(null)}
         />
       ) : null}
+      <BriefingOverlay open={briefingOpen} onAcknowledge={acknowledgeBriefing} />
       <KeyboardHelpOverlay
         open={keysOpen}
         onClose={() => setKeysOpen(false)}

@@ -42,6 +42,10 @@ fn default_ui_density() -> String {
     "compact".into()
 }
 
+fn default_briefing_seen() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -57,6 +61,9 @@ pub struct AppSettings {
     pub ui_density: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_size: Option<WindowSize>,
+    /// True after the operator ACKs the first-run briefing overlay.
+    #[serde(default = "default_briefing_seen")]
+    pub briefing_seen: bool,
 }
 
 fn default_settings_version() -> u32 {
@@ -76,6 +83,7 @@ impl Default for AppSettings {
             strip_metadata: true,
             ui_density: "compact".into(),
             window_size: None,
+            briefing_seen: false,
         }
     }
 }
@@ -228,7 +236,8 @@ mod tests {
             "concurrency": 1,
             "stripMetadata": false,
             "uiDensity": "regular",
-            "windowSize": { "width": 960, "height": 720 }
+            "windowSize": { "width": 960, "height": 720 },
+            "briefingSeen": true
         }"#;
         let parsed = parse_settings_str(raw);
         assert_eq!(parsed.concurrency, 1);
@@ -243,6 +252,15 @@ mod tests {
                 height: 720
             })
         );
+        assert!(parsed.briefing_seen);
+    }
+
+    #[test]
+    fn missing_briefing_seen_defaults_false() {
+        let parsed = parse_settings_str(
+            r#"{"version":1,"concurrency":2,"stripMetadata":true,"uiDensity":"compact"}"#,
+        );
+        assert!(!parsed.briefing_seen);
     }
 
     #[test]
@@ -272,6 +290,7 @@ mod tests {
         assert_eq!(d.concurrency, DEFAULT_CONCURRENCY);
         assert!(d.strip_metadata);
         assert!(d.window_size.is_none());
+        assert!(!d.briefing_seen);
     }
 
     #[test]

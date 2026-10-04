@@ -146,18 +146,23 @@ export function matchShortcut(
 export type ShortcutDispatch = "run" | "closeHelp" | "ignore";
 
 /**
- * Overlay priority for Escape: KEYS help and image preview both claim Esc.
- * Help closes via toggle; preview closes via its own listener — never abort.
+ * Overlay priority for Escape: KEYS, briefing, and image preview claim Esc.
+ * Help closes via toggle; briefing/preview close via their own listeners — never abort.
  */
 export function resolveShortcutDispatch(
   id: ShortcutId,
-  opts: { canAbort: boolean; helpOpen: boolean; previewOpen: boolean },
+  opts: {
+    canAbort: boolean;
+    helpOpen: boolean;
+    previewOpen: boolean;
+    briefingOpen?: boolean;
+  },
 ): ShortcutDispatch {
   if (opts.helpOpen) {
     if (id === "toggleHelp" || id === "abortAll") return "closeHelp";
     return "ignore";
   }
-  if (opts.previewOpen) return "ignore";
+  if (opts.briefingOpen || opts.previewOpen) return "ignore";
   if (id === "abortAll" && !opts.canAbort) return "ignore";
   return "run";
 }
