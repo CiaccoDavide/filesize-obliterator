@@ -1,8 +1,10 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { createBatchAdmissionController } from "../compress/batchAdmission";
 import {
   aggregateEstimates,
   type EstimateItem,
 } from "../compress/estimateAggregate";
+import { runEstimatePreview } from "../compress/estimatePreview";
 import { compressEstimate } from "../ipc/compress";
 import type { StagedFile } from "../intake/types";
 
@@ -18,6 +20,7 @@ export function useCompressEstimate() {
   const [items, setItems] = useState<EstimateItem[]>([]);
   const [estimating, setEstimating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const gateRef = useRef(createBatchAdmissionController());
 
   const summary = useMemo(() => aggregateEstimates(items), [items]);
 
@@ -28,41 +31,64 @@ export function useCompressEstimate() {
   }, [items]);
 
   const clearEstimates = useCallback(() => {
+    // Invalidate any in-flight previewStaged so a late setItems cannot land.
+    gateRef.current.abort();
     setItems([]);
     setError(null);
+    setEstimating(false);
   }, []);
 
   const previewStaged = useCallback(async (files: StagedFile[]) => {
     const ready = files.filter((f) => f.presetId);
     if (ready.length === 0) {
+      gateRef.current.abort();
       setError("NO PRESET — select an alternative");
       setItems([]);
+      setEstimating(false);
       return;
     }
+
+    // New PREVIEW supersedes any prior in-flight call.
+    gateRef.current.abort();
+    const token = gateRef.current.begin();
+    const isCurrent = () => gateRef.current.isCurrent(token);
+
     setEstimating(true);
     setError(null);
-    const next: EstimateItem[] = [];
+    const partial: EstimateItem[] = [];
     try {
-      for (const file of ready) {
-        const result = await compressEstimate({
-          sourcePath: file.path,
-          mediaKind: file.kind,
-          presetId: file.presetId,
-        });
-        next.push({
-          path: result.path,
-          presetId: result.presetId,
-          estimatedBytes: result.estimatedBytes,
-          confidence: result.confidence,
-          originalBytes: result.originalBytes,
-        });
-      }
+      const next = await runEstimatePreview(
+        ready.map((f) => ({
+          path: f.path,
+          mediaKind: f.kind,
+          presetId: f.presetId,
+        })),
+        async (file) => {
+          const result = await compressEstimate({
+            sourcePath: file.path,
+            mediaKind: file.mediaKind,
+            presetId: file.presetId,
+          });
+          const item: EstimateItem = {
+            path: result.path,
+            presetId: result.presetId,
+            estimatedBytes: result.estimatedBytes,
+            confidence: result.confidence,
+            originalBytes: result.originalBytes,
+          };
+          partial.push(item);
+          return item;
+        },
+        isCurrent,
+      );
+      if (next === null || !isCurrent()) return;
       setItems(next);
     } catch (err: unknown) {
-      setItems(next);
+      if (!isCurrent()) return;
+      setItems(partial);
       setError(errorMessage(err));
     } finally {
-      setEstimating(false);
+      if (isCurrent()) setEstimating(false);
     }
   }, []);
 
