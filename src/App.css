@@ -141,6 +141,10 @@
   background: rgba(0, 0, 0, 0.18);
 }
 
+.staged-row.has-estimate {
+  grid-template-columns: 4.5rem minmax(0, 1fr) minmax(5rem, auto) auto auto;
+}
+
 .staged-row .reveal-actions {
   grid-column: 1 / -1;
 }
@@ -174,6 +178,52 @@
   font-size: 0.72rem;
   color: var(--muted);
   white-space: nowrap;
+}
+
+.staged-estimate {
+  font-size: 0.72rem;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.estimate-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.estimate-strip-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.estimate-strip-head .panel-label {
+  margin: 0;
+}
+
+.estimate-approx {
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.estimate-empty {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.estimate-meters {
+  margin: 0;
 }
 
 .hud-toggle {
