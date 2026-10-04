@@ -6,7 +6,8 @@ export type OpsPhase =
   | "COMPRESSING"
   | "COMPLETE"
   | "FAILED"
-  | "ABORTING";
+  | "ABORTING"
+  | "SKIPPED";
 
 /** Per-file row tracked from job IPC + event stream. */
 export type ProgressRow = {
@@ -31,6 +32,7 @@ const PHASE_RANK: Record<OpsPhase, number> = {
   ABORTING: 2,
   COMPLETE: 3,
   FAILED: 3,
+  SKIPPED: 3,
 };
 
 export function jobStatusToPhase(status: JobStatus): OpsPhase {
@@ -45,6 +47,8 @@ export function jobStatusToPhase(status: JobStatus): OpsPhase {
       return "FAILED";
     case "cancelled":
       return "FAILED";
+    case "skipped":
+      return "SKIPPED";
     default: {
       const _exhaustive: never = status;
       return _exhaustive;
@@ -149,7 +153,7 @@ export function markFailed(
 }
 
 function isTerminalPhase(phase: OpsPhase): boolean {
-  return phase === "COMPLETE" || phase === "FAILED";
+  return phase === "COMPLETE" || phase === "FAILED" || phase === "SKIPPED";
 }
 
 function rejectMessage(reason: unknown): string {
@@ -270,6 +274,10 @@ export function deriveOpsPhase(rows: ProgressRow[]): OpsPhase {
     return "COMPRESSING";
   }
   if (rows.some((r) => r.phase === "FAILED")) return "FAILED";
+  if (rows.every((r) => r.phase === "SKIPPED")) return "SKIPPED";
+  if (rows.some((r) => r.phase === "SKIPPED") && !rows.some((r) => r.phase === "COMPLETE")) {
+    return "SKIPPED";
+  }
   return "COMPLETE";
 }
 

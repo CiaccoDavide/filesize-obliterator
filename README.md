@@ -76,6 +76,12 @@ Still images are compressed locally with Rust codecs (no cloud APIs). Built-in p
 
 Outputs land beside the source under `_compressed/`.
 
+### Skip already-compressed (`force`)
+
+Re-running the same **source path + preset** skips by default when a prior successful encode left a matching offline sidecar under `_compressed/.fo-already/` and the output file still exists with the same source content hash. Skipped queue rows show as **SKIPPED** with reason `already compressed for this preset` and count toward the batch **Skip** meter.
+
+Turn on HUD **Force** (`compress_start.force=true`) to re-encode anyway; the new file follows the usual collision policy (`Photo.webp`, then `Photo_2.webp`, …). Detection is local only — no cloud dedupe.
+
 ### Metadata (`stripMetadata`)
 
 Job option `stripMetadata` (default **true**, HUD: **Strip metadata**):

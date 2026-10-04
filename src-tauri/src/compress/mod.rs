@@ -5,6 +5,7 @@ mod manager;
 mod output;
 mod pdf_encode;
 mod presets;
+mod skip;
 mod state;
 mod types;
 mod video_encode;

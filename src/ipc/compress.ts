@@ -9,7 +9,8 @@ export type JobStatus =
   | "running"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "skipped";
 
 export type CompressStartRequest = {
   sourcePath: string;
@@ -17,6 +18,8 @@ export type CompressStartRequest = {
   presetId: string;
   /** Default true when omitted by older callers — strip EXIF/GPS / container tags. */
   stripMetadata?: boolean;
+  /** Default false — skip when an output already exists for this source+preset. */
+  force?: boolean;
 };
 
 /** Mirrored from Rust `compress::presets::PresetInfo`. */

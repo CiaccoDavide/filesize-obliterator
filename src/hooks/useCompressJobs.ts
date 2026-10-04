@@ -14,6 +14,7 @@ export type CompressJobsStatus =
  */
 export type StartStagedOptions = {
   stripMetadata?: boolean;
+  force?: boolean;
 };
 
 export function useCompressJobs() {
@@ -39,6 +40,7 @@ export function useCompressJobs() {
             mediaKind: file.kind,
             presetId: file.presetId,
             stripMetadata: options?.stripMetadata,
+            force: options?.force,
           });
           started.push(job);
         }

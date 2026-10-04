@@ -21,6 +21,7 @@ describe("aggregateSessionStats", () => {
     expect(aggregateSessionStats([])).toEqual({
       filesDone: 0,
       filesFailed: 0,
+      filesSkipped: 0,
       bytesIn: 0,
       bytesOut: 0,
       bytesSaved: 0,
@@ -46,6 +47,7 @@ describe("aggregateSessionStats", () => {
     expect(stats).toEqual({
       filesDone: 2,
       filesFailed: 0,
+      filesSkipped: 0,
       bytesIn: 6144,
       bytesOut: 1536,
       bytesSaved: 4608,
@@ -71,10 +73,35 @@ describe("aggregateSessionStats", () => {
     ]);
     expect(stats.filesDone).toBe(1);
     expect(stats.filesFailed).toBe(1);
+    expect(stats.filesSkipped).toBe(0);
     expect(stats.bytesIn).toBe(1000);
     expect(stats.bytesOut).toBe(400);
     expect(stats.bytesSaved).toBe(600);
     expect(stats.savePercent).toBe(60);
+  });
+
+  it("counts skipped jobs in the batch summary without savings", () => {
+    const stats = aggregateSessionStats([
+      row({
+        jobId: "ok",
+        phase: "COMPLETE",
+        originalBytes: 1000,
+        resultBytes: 400,
+      }),
+      row({
+        jobId: "skip",
+        phase: "SKIPPED",
+        originalBytes: 2000,
+        resultBytes: 500,
+        error: "already compressed for this preset",
+        outputPath: "/a/_compressed/x.webp",
+      }),
+    ]);
+    expect(stats.filesDone).toBe(1);
+    expect(stats.filesSkipped).toBe(1);
+    expect(stats.bytesIn).toBe(1000);
+    expect(stats.bytesOut).toBe(400);
+    expect(stats.bytesSaved).toBe(600);
   });
 
   it("ignores in-flight rows for byte meters", () => {
@@ -117,6 +144,7 @@ describe("aggregateSessionStats", () => {
     expect(aggregateSessionStats(afterClear)).toEqual({
       filesDone: 0,
       filesFailed: 0,
+      filesSkipped: 0,
       bytesIn: 0,
       bytesOut: 0,
       bytesSaved: 0,
