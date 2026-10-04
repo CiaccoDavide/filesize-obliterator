@@ -81,8 +81,20 @@ export function buildBatchSummary(rows: ProgressRow[]): BatchSummary | null {
   if (rows.length === 0) return null;
   if (rows.some((r) => isActivePhase(r.phase))) return null;
 
-  const succeeded = rows.filter((r) => r.phase === "COMPLETE").length;
-  const failedRows = rows.filter((r) => r.phase === "FAILED");
+  // Scope to the latest admission generation so older FAILED rows cannot pollute
+  // PARTIAL after a later successful COMPRESS batch.
+  const currentGen = rows.reduce(
+    (max, r) => Math.max(max, r.batchGeneration ?? 0),
+    0,
+  );
+  const scoped =
+    currentGen === 0
+      ? rows
+      : rows.filter((r) => (r.batchGeneration ?? 0) === currentGen);
+  if (scoped.length === 0) return null;
+
+  const succeeded = scoped.filter((r) => r.phase === "COMPLETE").length;
+  const failedRows = scoped.filter((r) => r.phase === "FAILED");
   const failed = failedRows.length;
   const failures = failedRows.map((r) => ({
     path: r.sourcePath,

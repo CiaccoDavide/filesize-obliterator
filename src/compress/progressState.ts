@@ -26,6 +26,8 @@ export type ProgressRow = {
   resultBytes?: number;
   durationMs?: number;
   error?: string;
+  /** Admission generation for this row's batch; scopes batch summary. */
+  batchGeneration?: number;
 };
 
 const PHASE_RANK: Record<OpsPhase, number> = {
@@ -130,6 +132,8 @@ export function mergeJobRow(
     resultBytes: fromJob.resultBytes ?? existing.resultBytes,
     durationMs: fromJob.durationMs ?? existing.durationMs,
     error: mergeOpsError(existing.error, fromJob.error),
+    // JobInfo-derived rows omit batchGeneration — keep the admit tag.
+    batchGeneration: existing.batchGeneration ?? fromJob.batchGeneration,
   };
 }
 

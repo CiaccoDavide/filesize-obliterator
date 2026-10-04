@@ -130,6 +130,32 @@ describe("buildBatchSummary", () => {
       ],
     });
   });
+
+  it("ignores older-generation FAILED after a later successful batch", () => {
+    expect(
+      buildBatchSummary([
+        row({
+          jobId: "old-fail",
+          phase: "FAILED",
+          sourcePath: "/tmp/old.png",
+          error: "encoder crashed",
+          batchGeneration: 1,
+        }),
+        row({
+          jobId: "new-ok",
+          phase: "COMPLETE",
+          sourcePath: "/tmp/new.png",
+          outputPath: "/tmp/_compressed/new.webp",
+          batchGeneration: 2,
+        }),
+      ]),
+    ).toMatchObject({
+      status: "COMPLETE",
+      succeeded: 1,
+      failed: 0,
+      failures: [],
+    });
+  });
 });
 
 describe("failedRowsForRetry / dismissFailedRows", () => {

@@ -125,22 +125,28 @@ where
     }
 }
 
-/// Drop armed staging only after an abandoned encode thread exits, so a late
-/// writer cannot recreate `.partial` / reserved paths after an early release.
-fn release_staging_after_encode_thread(
+/// Join any abandoned encode thread, drop armed staging, then run `finish`.
+/// Failed/Cancelled must not emit while `.partial` / reserved may still exist —
+/// RETRY stays gated (ABORTING/COMPRESSING) until cleanup completes.
+fn finish_after_staging_cleanup<F>(
     staging: StagingCleanup,
     abandoned: Option<thread::JoinHandle<()>>,
-) {
+    finish: F,
+) where
+    F: FnOnce() + Send + 'static,
+{
     match abandoned {
         Some(join) => {
             thread::spawn(move || {
                 let _ = join.join();
                 drop(staging);
+                finish();
             });
         }
         None => {
             let mut staging = staging;
             staging.release();
+            finish();
         }
     }
 }
@@ -972,12 +978,15 @@ fn run_job(
     };
 
     if let Err(error) = outcome.result {
-        release_staging_after_encode_thread(staging, outcome.abandoned);
-        if error == "cancelled" {
-            cancel_job(&manager, &app, job_id);
-        } else {
-            fail_job(&manager, &app, job_id, error);
-        }
+        let manager_finish = manager.clone();
+        let app_finish = app.clone();
+        finish_after_staging_cleanup(staging, outcome.abandoned, move || {
+            if error == "cancelled" {
+                cancel_job(&manager_finish, &app_finish, job_id);
+            } else {
+                fail_job(&manager_finish, &app_finish, job_id, error);
+            }
+        });
         return;
     }
 
@@ -1616,16 +1625,34 @@ mod tests {
         );
         assert_eq!(outcome.result, Err("cancelled".into()));
 
-        // Same pattern as the encode worker: fail immediately, clean after join.
-        release_staging_after_encode_thread(staging, outcome.abandoned);
+        // Same pattern as the encode worker: emit Failed only after join + cleanup.
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_flag = Arc::clone(&finished);
+        let partial_check = partial.clone();
+        let reserved_check = reserved.clone();
+        finish_after_staging_cleanup(staging, outcome.abandoned, move || {
+            assert!(
+                !partial_check.exists(),
+                "Failed must not emit while .partial may still exist"
+            );
+            assert!(
+                !reserved_check.exists(),
+                "Failed must not emit while reserved may still exist"
+            );
+            finished_flag.store(true, Ordering::SeqCst);
+        });
         drop(block_tx);
 
         for _ in 0..50 {
-            if !partial.exists() && !reserved.exists() {
+            if finished.load(Ordering::SeqCst) {
                 break;
             }
             thread::sleep(Duration::from_millis(20));
         }
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "finish (Failed emit point) must run after staging cleanup"
+        );
         assert!(!partial.exists(), "partial must be removed after orphan exits");
         assert!(!reserved.exists(), "reserved must be removed after orphan exits");
         let _ = fs::remove_dir_all(&root);

@@ -267,6 +267,13 @@ export function useCompressProgress() {
       admittedIdsRef.current = new Set();
       setStarting(true);
       setError(null);
+      // Drop prior FAILED and tag kept successes with this batch generation so
+      // buildBatchSummary cannot mix stale failures into a later COMPRESS.
+      setRows((prev) =>
+        prev
+          .filter((r) => r.phase !== "FAILED")
+          .map((r) => ({ ...r, batchGeneration: token })),
+      );
       try {
         await runSequentialAdmit(targets, {
           isCurrent: () => admissionRef.current.isCurrent(token),
@@ -281,7 +288,12 @@ export function useCompressProgress() {
           onAdmitted: (job) => {
             admittedIdsRef.current.add(job.id);
             touchActivity(job.id);
-            setRows((prev) => upsertJob(prev, job));
+            setRows((prev) => {
+              const next = upsertJob(prev, job);
+              return next.map((r) =>
+                r.jobId === job.id ? { ...r, batchGeneration: token } : r,
+              );
+            });
           },
           onLateAdmit: (job) => {
             void compressCancel(job.id).catch(() => {
@@ -301,6 +313,7 @@ export function useCompressProgress() {
                 phase: "FAILED",
                 percent: 0,
                 error: message,
+                batchGeneration: token,
               },
             ]);
           },
