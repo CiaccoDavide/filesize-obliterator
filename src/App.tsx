@@ -9,11 +9,13 @@ import {
 } from "./components/ImageComparePreview";
 import { IntakeStatus } from "./components/IntakeStatus";
 import { PresetPicker } from "./components/PresetPicker";
+import { SettingsPanel } from "./components/SettingsPanel";
 import { StagedFileList } from "./components/StagedFileList";
 import type { ProgressRow } from "./compress/progressState";
 import { useCompressEstimate } from "./hooks/useCompressEstimate";
 import { useCompressProgress } from "./hooks/useCompressProgress";
 import { useFileIntake } from "./hooks/useFileIntake";
+import { useLocalSettings } from "./hooks/useLocalSettings";
 import { usePresets } from "./hooks/usePresets";
 import type { MediaKind } from "./ipc/compress";
 import { revealInFileManager } from "./ipc/reveal";
@@ -50,14 +52,16 @@ function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [pingResult, setPingResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  /** Session privacy control — bound into compress_start as stripMetadata (default on). */
-  const [stripMetadata, setStripMetadata] = useState(true);
   const [imagePreview, setImagePreview] = useState<ImageCompareTarget | null>(
     null,
   );
   /** When on, re-encode even if source+preset already has a `_compressed` output. */
   const [forceReencode, setForceReencode] = useState(false);
-  const presets = usePresets();
+  const local = useLocalSettings();
+  const presets = usePresets({
+    preferredDefaults: local.settings.defaultPresets,
+    settingsReady: local.loaded,
+  });
   const {
     staged,
     status,
@@ -119,6 +123,7 @@ function App() {
     estimate.clearEstimates();
     presets.setKindPreset(kind, presetId);
     setKindPreset(kind, presetId);
+    local.setDefaultPreset(kind, presetId);
   }
 
   function handlePreviewImage(row: ProgressRow) {
@@ -147,8 +152,13 @@ function App() {
     [setStatus],
   );
 
+  const shellClass =
+    local.settings.uiDensity === "regular"
+      ? "app-shell density-regular"
+      : "app-shell density-compact";
+
   return (
-    <div className="app-shell">
+    <div className={shellClass}>
       <div className="grid-bg" aria-hidden="true" />
       <main className="app-main">
         <section className="setup">
@@ -199,30 +209,22 @@ function App() {
             </p>
           ) : null}
 
+          {local.status ? (
+            <p className="compress-status tone-danger" role="alert">
+              {local.status}
+            </p>
+          ) : null}
+
+          <SettingsPanel
+            settings={local.settings}
+            disabled={!local.loaded}
+            onConcurrency={local.setConcurrency}
+            onStripMetadata={local.setStripMetadata}
+            onUiDensity={local.setUiDensity}
+          />
+
           <div className="hud-frame setup-surface">
-            <p className="panel-label">Privacy</p>
-            <label className="hud-toggle">
-              <input
-                type="checkbox"
-                checked={stripMetadata}
-                onChange={(e) => setStripMetadata(e.target.checked)}
-              />
-              <span className="hud-toggle-label">Strip metadata</span>
-              <span className="mono hud-toggle-state">
-                {stripMetadata ? "ON" : "OFF"}
-              </span>
-            </label>
-            <p className="hud-toggle-hint">
-              {stripMetadata
-                ? "EXIF/GPS removed on image/video outputs."
-                : "Preserve orientation and tags where the pipeline allows."}
-            </p>
-            <p
-              className="hud-toggle-hint mono"
-              data-testid="strip-metadata-payload"
-            >
-              compress_start.stripMetadata={String(stripMetadata)}
-            </p>
+            <p className="panel-label">Session</p>
             <label className="hud-toggle">
               <input
                 type="checkbox"
@@ -262,7 +264,7 @@ function App() {
             onPreview={() => void estimate.previewStaged(staged)}
             onStart={() =>
               void compress.startStaged(staged, {
-                stripMetadata,
+                stripMetadata: local.settings.stripMetadata,
                 force: forceReencode,
               })
             }

@@ -156,6 +156,29 @@ fn capabilities_do_not_grant_http_client() {
     }
 }
 
+/// Window size restore uses `setSize`; `core:window:default` does not include it.
+/// CloseRequested flush awaits save then `destroy()` — also not in the window default set.
+#[test]
+fn capabilities_grant_window_set_size() {
+    let caps = parse_json(&repo_root().join("src-tauri/capabilities/default.json"));
+    let permissions = caps
+        .get("permissions")
+        .and_then(|v| v.as_array())
+        .expect("capabilities.default.permissions must be an array");
+    assert!(
+        permissions
+            .iter()
+            .any(|perm| permission_identifier(perm) == Some("core:window:allow-set-size")),
+        "capabilities must grant core:window:allow-set-size for settings window restore"
+    );
+    assert!(
+        permissions
+            .iter()
+            .any(|perm| permission_identifier(perm) == Some("core:window:allow-destroy")),
+        "capabilities must grant core:window:allow-destroy for CloseRequested settings flush"
+    );
+}
+
 /// `openPath` denies when the allow list is empty — OPEN _COMPRESSED needs a path scope.
 #[test]
 fn opener_allow_open_path_has_path_allow_scope() {
@@ -252,5 +275,40 @@ fn readme_states_offline_only_constraint() {
                 || lower.contains("offline-only")
                 || lower.contains("does not require")),
         "README must document the offline-only product constraint"
+    );
+}
+
+
+#[test]
+fn settings_persist_locally_without_network_plugins() {
+    let cargo = read_to_string(&repo_root().join("src-tauri/Cargo.toml"));
+    assert!(
+        !cargo.contains("tauri-plugin-http")
+            && !cargo.contains("reqwest")
+            && !cargo.contains("ureq"),
+        "settings must not pull in HTTP client crates"
+    );
+    let settings = read_to_string(&repo_root().join("src-tauri/src/settings.rs"));
+    assert!(
+        settings.contains("app_config_dir") || settings.contains("SETTINGS_FILE_NAME"),
+        "settings module must write to the local app config dir"
+    );
+    assert!(
+        settings.contains("json.tmp") && settings.contains("rename"),
+        "settings write must use temp file + atomic rename"
+    );
+    assert!(
+        !settings.contains("http://") && !settings.contains("https://"),
+        "settings.rs must not reference remote URLs"
+    );
+    let package = parse_json(&repo_root().join("package.json"));
+    let deps = package
+        .get("dependencies")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !deps.keys().any(|k| k.contains("plugin-http") || k.contains("plugin-updater")),
+        "frontend must not add network plugins for settings sync"
     );
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   compressListPresets,
   type MediaKind,
@@ -24,34 +24,54 @@ function groupByKind(all: PresetInfo[]): Record<MediaKind, PresetInfo[]> {
 
 function defaultsFromCatalog(
   byKind: Record<MediaKind, PresetInfo[]>,
+  preferred: PresetByKind = {},
 ): PresetByKind {
   const next: PresetByKind = {};
   for (const kind of KINDS) {
+    const preferredId = preferred[kind];
+    if (preferredId && byKind[kind]?.some((p) => p.id === preferredId)) {
+      next[kind] = preferredId;
+      continue;
+    }
     const id = pickDefaultPresetId(byKind[kind]);
     if (id) next[kind] = id;
   }
   return next;
 }
 
+type Options = {
+  /** Persisted per-kind defaults; applied once the catalog loads. */
+  preferredDefaults?: PresetByKind;
+  /** True once local settings have been read (so we do not overwrite with catalog defaults). */
+  settingsReady?: boolean;
+};
+
 /**
  * Loads the backend preset registry once and tracks global-per-kind selection.
- * Defaults to balanced (ebook for PDF) from the returned list — never hard-coded duplicates.
+ * Prefers persisted defaults when valid; else balanced (ebook for PDF).
  */
-export function usePresets() {
+export function usePresets(options: Options = {}) {
+  const { preferredDefaults = {}, settingsReady = true } = options;
+  const preferredRef = useRef(preferredDefaults);
+  preferredRef.current = preferredDefaults;
   const [catalog, setCatalog] = useState<PresetInfo[]>([]);
   const [presetByKind, setPresetByKind] = useState<PresetByKind>({});
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
+  // Load catalog once settings are ready so persisted defaults win over catalog picks.
+  // Do not re-fetch when the user later changes a preset (that only updates local settings).
   useEffect(() => {
+    if (!settingsReady) return;
     let cancelled = false;
 
     async function load() {
       try {
         const all = await compressListPresets();
         if (cancelled) return;
+        const grouped = groupByKind(all);
         setCatalog(all);
-        setPresetByKind(defaultsFromCatalog(groupByKind(all)));
+        setPresetByKind(defaultsFromCatalog(grouped, preferredRef.current));
         setLoaded(true);
       } catch (err: unknown) {
         if (!cancelled) {
@@ -65,7 +85,7 @@ export function usePresets() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [settingsReady]);
 
   const byKind = useMemo(() => groupByKind(catalog), [catalog]);
 

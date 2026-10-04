@@ -22,8 +22,10 @@ use super::types::{
 };
 use super::video_encode::encode_video;
 
-/// Hard cap on parallel encode workers (video/ffmpeg-heavy workloads).
-pub const MAX_CONCURRENT_JOBS: usize = 2;
+/// Default parallel encode workers (video/ffmpeg-heavy workloads).
+pub const DEFAULT_MAX_CONCURRENT_JOBS: usize = 2;
+/// Absolute ceiling — settings clamp into this range.
+pub const ABS_MAX_CONCURRENT_JOBS: usize = 4;
 
 /// After cancel, wait this long for cooperative encoder exit before force-failing.
 const CANCEL_FORCE_FAIL_GRACE: Duration = Duration::from_secs(8);
@@ -169,6 +171,8 @@ struct Inner {
     wait_queue: VecDeque<QueuedWork>,
     /// Number of worker threads currently executing encode work.
     active_workers: usize,
+    /// Configurable cap (settings); never unbounded.
+    max_concurrent: usize,
 }
 
 #[derive(Clone, Default)]
@@ -183,6 +187,7 @@ impl Default for Inner {
             jobs: HashMap::new(),
             wait_queue: VecDeque::new(),
             active_workers: 0,
+            max_concurrent: DEFAULT_MAX_CONCURRENT_JOBS,
         }
     }
 }
@@ -283,7 +288,28 @@ impl JobManager {
         Ok(info)
     }
 
-    /// Admit a job into the ordered queue and pump workers up to [`MAX_CONCURRENT_JOBS`].
+    /// Update the worker cap (persisted settings). Clamped to 1..=ABS_MAX.
+    pub fn set_max_concurrent(&self, max: usize) -> Result<(), String> {
+        let clamped = max.clamp(1, ABS_MAX_CONCURRENT_JOBS);
+        {
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|_| "job manager lock poisoned".to_string())?;
+            guard.max_concurrent = clamped;
+        }
+        self.pump();
+        Ok(())
+    }
+
+    pub fn max_concurrent(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|g| g.max_concurrent)
+            .unwrap_or(DEFAULT_MAX_CONCURRENT_JOBS)
+    }
+
+    /// Admit a job into the ordered queue and pump workers up to the configured cap.
     fn admit<F>(
         &self,
         request: CompressStartRequest,
@@ -345,7 +371,7 @@ impl JobManager {
                     Ok(g) => g,
                     Err(_) => return,
                 };
-                if guard.active_workers >= MAX_CONCURRENT_JOBS {
+                if guard.active_workers >= guard.max_concurrent {
                     return;
                 }
                 let mut chosen: Option<QueuedWork> = None;
@@ -1249,8 +1275,9 @@ mod tests {
     }
 
     #[test]
-    fn concurrency_cap_is_two() {
-        assert_eq!(MAX_CONCURRENT_JOBS, 2);
+    fn default_concurrency_cap_is_two() {
+        assert_eq!(DEFAULT_MAX_CONCURRENT_JOBS, 2);
+        assert_eq!(JobManager::default().max_concurrent(), 2);
     }
 
     #[test]
@@ -1259,6 +1286,7 @@ mod tests {
         use std::time::Duration;
 
         let manager = JobManager::default();
+        let cap = manager.max_concurrent();
         let block = Arc::new(AtomicBool::new(true));
         let in_flight = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
@@ -1283,16 +1311,16 @@ mod tests {
         // Wait until the cap is saturated.
         let mut saw_cap = false;
         for _ in 0..100 {
-            if in_flight.load(Ordering::SeqCst) == MAX_CONCURRENT_JOBS {
+            if in_flight.load(Ordering::SeqCst) == cap {
                 saw_cap = true;
                 break;
             }
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(saw_cap, "expected {MAX_CONCURRENT_JOBS} workers in flight");
-        assert_eq!(manager.active_workers_for_test(), MAX_CONCURRENT_JOBS);
+        assert!(saw_cap, "expected {cap} workers in flight");
+        assert_eq!(manager.active_workers_for_test(), cap);
         assert!(manager.wait_queue_len_for_test() >= 1);
-        assert_eq!(peak.load(Ordering::SeqCst), MAX_CONCURRENT_JOBS);
+        assert_eq!(peak.load(Ordering::SeqCst), cap);
 
         block.store(false, Ordering::SeqCst);
         for _ in 0..100 {
@@ -1304,9 +1332,58 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
-        assert_eq!(peak.load(Ordering::SeqCst), MAX_CONCURRENT_JOBS);
+        assert_eq!(peak.load(Ordering::SeqCst), cap);
         assert_eq!(manager.active_workers_for_test(), 0);
         assert_eq!(manager.wait_queue_len_for_test(), 0);
+    }
+
+    #[test]
+    fn set_max_concurrent_is_applied_on_next_pump() {
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Duration;
+
+        let manager = JobManager::default();
+        manager.set_max_concurrent(1).expect("set cap");
+        assert_eq!(manager.max_concurrent(), 1);
+
+        let block = Arc::new(AtomicBool::new(true));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        for i in 0..3 {
+            let block = Arc::clone(&block);
+            let in_flight = Arc::clone(&in_flight);
+            let peak = Arc::clone(&peak);
+            let source = temp_source(&format!("cap1-{i}.bin"), b"x");
+            manager
+                .start_with_work(source, move |_| {
+                    let n = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(n, Ordering::SeqCst);
+                    while block.load(Ordering::SeqCst) {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                })
+                .expect("admit");
+        }
+
+        for _ in 0..100 {
+            if in_flight.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        assert!(manager.wait_queue_len_for_test() >= 1);
+
+        block.store(false, Ordering::SeqCst);
+        for _ in 0..100 {
+            if manager.active_workers_for_test() == 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
@@ -1317,7 +1394,7 @@ mod tests {
         let block = Arc::new(AtomicBool::new(true));
         let ran_waiting = Arc::new(AtomicBool::new(false));
 
-        for i in 0..MAX_CONCURRENT_JOBS {
+        for i in 0..DEFAULT_MAX_CONCURRENT_JOBS {
             let block = Arc::clone(&block);
             let source = temp_source(&format!("block-{i}.bin"), b"x");
             manager
@@ -1331,12 +1408,12 @@ mod tests {
 
         // Wait for blockers to take both slots.
         for _ in 0..100 {
-            if manager.active_workers_for_test() == MAX_CONCURRENT_JOBS {
+            if manager.active_workers_for_test() == DEFAULT_MAX_CONCURRENT_JOBS {
                 break;
             }
             thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(manager.active_workers_for_test(), MAX_CONCURRENT_JOBS);
+        assert_eq!(manager.active_workers_for_test(), DEFAULT_MAX_CONCURRENT_JOBS);
 
         let ran_waiting_flag = Arc::clone(&ran_waiting);
         let waiting = manager
