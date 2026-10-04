@@ -173,6 +173,7 @@ export function useLocalSettings(): LocalSettingsApi {
     let unlistenResize: (() => void) | undefined;
     let unlistenClose: (() => void) | undefined;
     let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    let closingAfterFlush = false;
 
     void (async () => {
       try {
@@ -195,10 +196,26 @@ export function useLocalSettings(): LocalSettingsApi {
             })();
           }, 500);
         });
-        // Await flush before destroy — Tauri runs destroy after the handler settles
-        // unless preventDefault() was called.
-        unlistenClose = await win.onCloseRequested(async () => {
-          await flushSave();
+        // Hold close until debounced edits hit disk, then destroy (bypasses CloseRequested).
+        unlistenClose = await win.onCloseRequested(async (event) => {
+          if (closingAfterFlush) return;
+          event.preventDefault();
+          closingAfterFlush = true;
+          try {
+            await flushSave();
+          } finally {
+            try {
+              await win.destroy();
+            } catch (err) {
+              closingAfterFlush = false;
+              if (isTauriRuntime()) {
+                console.error(
+                  "Failed to close window after settings flush",
+                  err,
+                );
+              }
+            }
+          }
         });
       } catch {
         // non-Tauri
