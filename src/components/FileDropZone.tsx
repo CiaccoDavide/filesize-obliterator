@@ -1,4 +1,4 @@
-import { forwardRef, type KeyboardEvent, type ReactNode } from "react";
+import { forwardRef, type ReactNode } from "react";
 
 type Props = {
   dragActive: boolean;
@@ -6,26 +6,20 @@ type Props = {
   children?: ReactNode;
 };
 
+/**
+ * Intake surface. Activation is the Browse button (not the region itself) so
+ * SR users get a real control and tab order is not polluted by a faux widget.
+ */
 export const FileDropZone = forwardRef<HTMLDivElement, Props>(
   function FileDropZone({ dragActive, onPick, children }, ref) {
-    function handleKeyDown(e: KeyboardEvent<HTMLDivElement>) {
-      if (e.target !== e.currentTarget) return;
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        onPick();
-      }
-    }
-
     return (
       <div
         ref={ref}
         className={`drop-zone hud-frame${dragActive ? " drop-zone-active" : ""}`}
         data-active={dragActive ? "true" : "false"}
-        tabIndex={0}
         role="region"
         aria-label="File intake drop zone"
         data-testid="drop-zone"
-        onKeyDown={handleKeyDown}
       >
         <p className="panel-label">Intake</p>
         <p className="drop-copy">
@@ -39,6 +33,7 @@ export const FileDropZone = forwardRef<HTMLDivElement, Props>(
             className="btn primary"
             onClick={onPick}
             aria-label="Browse files to stage"
+            data-drop-browse
           >
             Browse
           </button>
