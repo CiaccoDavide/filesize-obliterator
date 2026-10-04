@@ -148,6 +148,10 @@ export function markFailed(
   return copy;
 }
 
+function isTerminalPhase(phase: OpsPhase): boolean {
+  return phase === "COMPLETE" || phase === "FAILED";
+}
+
 /** Apply compress_cancel PromiseSettled results — never leave rows stuck in ABORTING. */
 export function applyCancelResults(
   rows: ProgressRow[],
@@ -162,6 +166,10 @@ export function applyCancelResults(
     if (result.status === "fulfilled") {
       next = upsertJob(next, result.value);
     } else {
+      const existing = next.find((r) => r.jobId === id);
+      // Cancel often rejects with "job already finished" after Complete/Failed;
+      // do not clobber a correct terminal phase.
+      if (existing && isTerminalPhase(existing.phase)) continue;
       const reason = result.reason;
       const message =
         reason instanceof Error ? reason.message : String(reason);

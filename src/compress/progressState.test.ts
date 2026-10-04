@@ -288,6 +288,55 @@ describe("applyCancelResults", () => {
     expect(next.every((r) => r.phase !== "ABORTING")).toBe(true);
     expect(deriveOpsPhase(next)).toBe("FAILED");
   });
+
+  it("keeps COMPLETE when cancel rejects after the job already finished", () => {
+    const completed = applyCompressEvent(
+      [row({ phase: "ABORTING", percent: 90 })],
+      {
+        type: "complete",
+        jobId: "job-1",
+        outputPath: "/tmp/a_compressed.stub",
+        originalBytes: 1000,
+        resultBytes: 120,
+        durationMs: 40,
+      },
+    );
+    expect(completed[0].phase).toBe("COMPLETE");
+
+    const next = applyCancelResults(completed, ["job-1"], [
+      {
+        status: "rejected",
+        reason: new Error("job already finished"),
+      },
+    ]);
+
+    expect(next[0]).toMatchObject({
+      phase: "COMPLETE",
+      outputPath: "/tmp/a_compressed.stub",
+      resultBytes: 120,
+      error: undefined,
+    });
+    expect(deriveOpsPhase(next)).toBe("COMPLETE");
+  });
+
+  it("keeps FAILED when cancel rejects after an already-failed terminal row", () => {
+    const failed = [
+      row({
+        phase: "FAILED",
+        error: "encoder crashed",
+      }),
+    ];
+    const next = applyCancelResults(failed, ["job-1"], [
+      {
+        status: "rejected",
+        reason: new Error("job already finished"),
+      },
+    ]);
+    expect(next[0]).toMatchObject({
+      phase: "FAILED",
+      error: "encoder crashed",
+    });
+  });
 });
 
 describe("formatByteMeter / sizeDeltaLabel", () => {
