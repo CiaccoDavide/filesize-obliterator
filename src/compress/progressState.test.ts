@@ -651,6 +651,41 @@ describe("applyCancelResults", () => {
     expect(deriveOpsPhase(next)).toBe("COMPLETE");
   });
 
+  it("leaves ABORTING on already-finished cancel reject so Complete can win", () => {
+    // Race: cancel reject arrives before Complete — do not invent FAILED that
+    // blocks the success event (FAILED cannot be overwritten by Complete).
+    const aborting = markAborting(
+      [row({ phase: "COMPRESSING", percent: 95 })],
+      ["job-1"],
+    );
+    expect(aborting[0].phase).toBe("ABORTING");
+
+    const afterReject = applyCancelResults(aborting, ["job-1"], [
+      {
+        status: "rejected",
+        reason: new Error("job already finished"),
+      },
+    ]);
+    expect(afterReject[0].phase).toBe("ABORTING");
+    expect(afterReject[0].error).toBeUndefined();
+
+    const afterComplete = applyCompressEvent(afterReject, {
+      type: "complete",
+      jobId: "job-1",
+      outputPath: "/tmp/a_compressed.stub",
+      originalBytes: 1000,
+      resultBytes: 120,
+      durationMs: 40,
+    });
+    expect(afterComplete[0]).toMatchObject({
+      phase: "COMPLETE",
+      outputPath: "/tmp/a_compressed.stub",
+      resultBytes: 120,
+      error: undefined,
+    });
+    expect(deriveOpsPhase(afterComplete)).toBe("COMPLETE");
+  });
+
   it("keeps FAILED when cancel rejects after an already-failed terminal row", () => {
     const failed = [
       row({
@@ -695,6 +730,14 @@ describe("abortSurfaceErrorFromCancelResults", () => {
     ]);
     expect(error).toBe("ipc down");
   });
+
+  it("ignores job-already-finished reject while row is still ABORTING", () => {
+    const aborting = [row({ phase: "ABORTING" })];
+    const error = abortSurfaceErrorFromCancelResults(aborting, ["job-1"], [
+      { status: "rejected", reason: new Error("job already finished") },
+    ]);
+    expect(error).toBeNull();
+  });
 });
 
 describe("formatByteMeter / sizeDeltaLabel", () => {
@@ -736,6 +779,19 @@ describe("dismissed / tombstoned job ids", () => {
         bytesProcessed: 400,
         bytesTotal: 1000,
       },
+      ignored,
+    );
+    expect(rows).toEqual(before);
+  });
+
+  it("does not resurrect a clearFinished COMPLETE jobId from late Failed", () => {
+    // clearFinished must tombstone COMPLETE (and FAILED/SKIPPED) the same way
+    // DISMISS does — otherwise late Failed/progress recreates a HUD row.
+    const ignored = new Set(["cleared-ok"]);
+    const before: ProgressRow[] = [];
+    const rows = applyCompressEvent(
+      before,
+      { type: "failed", jobId: "cleared-ok", error: "cancelled" },
       ignored,
     );
     expect(rows).toEqual(before);

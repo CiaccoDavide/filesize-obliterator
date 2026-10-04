@@ -83,7 +83,7 @@ export function useCompressProgress() {
   const stallLabeledIdsRef = useRef<Set<string>>(new Set());
   /** When each job entered ABORTING — force-fail if Failed never arrives. */
   const abortStartedRef = useRef<Map<string, number>>(new Map());
-  /** Tombstones for DISMISS/RETRY/admit-dropped FAILED ids — ignore late events. */
+  /** Tombstones for DISMISS/RETRY/admit/clearFinished — ignore late events. */
   const dismissedJobIdsRef = useRef<Set<string>>(new Set());
   const lastOptionsRef = useRef<StartStagedOptions>({});
   const rowsRef = useRef(rows);
@@ -109,6 +109,18 @@ export function useCompressProgress() {
   const tombstoneFailedIds = useCallback((rows: ProgressRow[]) => {
     for (const row of rows) {
       if (row.phase === "FAILED") {
+        dismissedJobIdsRef.current.add(row.jobId);
+      }
+    }
+  }, []);
+
+  const tombstoneFinishedIds = useCallback((rows: ProgressRow[]) => {
+    for (const row of rows) {
+      if (
+        row.phase === "COMPLETE" ||
+        row.phase === "FAILED" ||
+        row.phase === "SKIPPED"
+      ) {
         dismissedJobIdsRef.current.add(row.jobId);
       }
     }
@@ -477,15 +489,17 @@ export function useCompressProgress() {
 
   /** Clears finished HUD rows only — never deletes on-disk `_compressed` outputs. */
   const clearFinished = useCallback(() => {
-    setRows((prev) =>
-      prev.filter(
+    setRows((prev) => {
+      // Tombstone like DISMISS so late progress/Failed cannot resurrect rows.
+      tombstoneFinishedIds(prev);
+      return prev.filter(
         (r) =>
           r.phase !== "COMPLETE" &&
           r.phase !== "FAILED" &&
           r.phase !== "SKIPPED",
-      ),
-    );
-  }, []);
+      );
+    });
+  }, [tombstoneFinishedIds]);
 
   return {
     rows,

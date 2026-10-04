@@ -196,6 +196,19 @@ function rejectMessage(reason: unknown): string {
 }
 
 /**
+ * compress_cancel NotCancellable — job already Complete/Failed on the backend.
+ * Leave non-terminal HUD rows for the Complete/Failed event; do not invent FAILED.
+ */
+function isAlreadyFinishedCancelReject(reason: unknown): boolean {
+  const msg = rejectMessage(reason).toLowerCase();
+  return (
+    msg.includes("already finished") ||
+    msg.includes("already terminal") ||
+    msg.includes("not cancellable")
+  );
+}
+
+/**
  * True when compress_cancel returned for a job that was already running — the
  * worker still owns StagingCleanup and will emit Failed after release. Keep
  * ABORTING (RETRY gated) until that event; queued-only cancels never emit.
@@ -236,6 +249,9 @@ export function applyCancelResults(
       // Cancel often rejects with "job already finished" after Complete/Failed;
       // do not clobber a correct terminal phase.
       if (existing && isTerminalPhase(existing.phase)) continue;
+      // Reject-before-Complete: leave ABORTING for the terminal event. Marking
+      // FAILED here permanently blocks Complete (and unlocks RETRY early).
+      if (isAlreadyFinishedCancelReject(result.reason)) continue;
       next = markFailed(next, id, rejectMessage(result.reason));
     }
   }
@@ -244,7 +260,7 @@ export function applyCancelResults(
 
 /**
  * Surface error for abortAll: only real cancel failures on still-active/ABORTING
- * rows. Ignore "job already finished" (and similar) when the row is already terminal.
+ * rows. Ignore already-finished cancel races (terminal event owns the outcome).
  */
 export function abortSurfaceErrorFromCancelResults(
   rows: ProgressRow[],
@@ -254,6 +270,7 @@ export function abortSurfaceErrorFromCancelResults(
   for (let i = 0; i < ids.length; i++) {
     const result = results[i];
     if (!result || result.status !== "rejected") continue;
+    if (isAlreadyFinishedCancelReject(result.reason)) continue;
     const existing = rows.find((r) => r.jobId === ids[i]);
     if (existing && isTerminalPhase(existing.phase)) continue;
     return rejectMessage(result.reason);
