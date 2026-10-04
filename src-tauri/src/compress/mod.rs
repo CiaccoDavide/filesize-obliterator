@@ -2,6 +2,7 @@ mod audio_encode;
 mod image_encode;
 mod manager;
 mod output;
+mod pdf_encode;
 mod presets;
 mod state;
 mod types;
