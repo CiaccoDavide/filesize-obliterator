@@ -1,3 +1,4 @@
+import type { MediaKind } from "../ipc/compress";
 import { detectKind } from "./kinds";
 import type { ResolvedPath, StagedFile } from "./types";
 
@@ -5,6 +6,11 @@ export type StageResult = {
   staged: StagedFile[];
   /** Terse HUD status line for the batch. */
   status: string;
+};
+
+export type StageOptions = {
+  /** Per-kind default preset ids (from backend list + UI selection). */
+  presetByKind?: Partial<Record<MediaKind, string>>;
 };
 
 function basename(path: string): string {
@@ -24,12 +30,14 @@ export function stageResolvedPaths(
   existing: StagedFile[],
   resolved: ResolvedPath[],
   mimeByPath: Record<string, string> = {},
+  options: StageOptions = {},
 ): StageResult {
   const byPath = new Map(existing.map((f) => [f.path, f]));
   let added = 0;
   let rejected = 0;
   let duplicates = 0;
   let lastRejectName = "";
+  const presetByKind = options.presetByKind ?? {};
 
   for (const item of resolved) {
     const kind = detectKind(item.path, mimeByPath[item.path]);
@@ -49,6 +57,7 @@ export function stageResolvedPaths(
       kind,
       bytes: item.bytes,
       status: "staged",
+      presetId: presetByKind[kind] ?? "",
     };
     byPath.set(item.path, entry);
     added += 1;

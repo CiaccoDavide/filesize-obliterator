@@ -9,6 +9,8 @@ export type StagedFile = {
   kind: Exclude<IntakeKind, "unsupported">;
   bytes: number;
   status: "staged";
+  /** Backend preset id from `compress_list_presets` (empty until assigned). */
+  presetId: string;
 };
 
 /** Path probe result from Rust `intake_resolve`. */
