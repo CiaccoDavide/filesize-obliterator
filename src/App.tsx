@@ -252,10 +252,13 @@ function App() {
           <CompressProgressPanel
             rows={compress.rows}
             phase={compress.phase}
+            batchSummary={compress.batchSummary}
             error={compress.error}
             starting={compress.starting}
             canAbort={compress.canAbort}
             aborting={compress.aborting}
+            canRetryFailed={compress.canRetryFailed}
+            canDismissFailed={compress.canDismissFailed}
             stagedCount={staged.length}
             estimating={estimate.estimating}
             onPreview={() => void estimate.previewStaged(staged)}
@@ -268,6 +271,8 @@ function App() {
             onAbort={() => void compress.abortAll()}
             onCancelOne={(jobId) => void compress.cancelOne(jobId)}
             onClearFinished={compress.clearFinished}
+            onRetryFailed={() => void compress.retryFailed()}
+            onDismissFailed={compress.dismissFailed}
             onPreviewImage={handlePreviewImage}
             onReveal={(action, targets) => void handleReveal(action, targets)}
           />

@@ -1,4 +1,5 @@
 import type { CompressEvent, JobInfo, JobStatus } from "../ipc/compress";
+import { ENCODER_STALL_ERROR, normalizeOpsError } from "./batchSummary";
 
 /** Operational phase shown on the live HUD strip. */
 export type OpsPhase =
@@ -6,6 +7,7 @@ export type OpsPhase =
   | "COMPRESSING"
   | "COMPLETE"
   | "FAILED"
+  | "PARTIAL"
   | "ABORTING"
   | "SKIPPED";
 
@@ -24,6 +26,14 @@ export type ProgressRow = {
   resultBytes?: number;
   durationMs?: number;
   error?: string;
+  /** Admission generation for this row's batch; scopes batch summary. */
+  batchGeneration?: number;
+  /**
+   * Set when the UI force-fails ABORTING after CANCEL_CLEANUP_TIMEOUT_MS while
+   * Rust may still be inside finish_after_staging_cleanup. RETRY stays gated
+   * until a real Failed event clears this flag.
+   */
+  cleanupPending?: boolean;
 };
 
 const PHASE_RANK: Record<OpsPhase, number> = {
@@ -32,6 +42,7 @@ const PHASE_RANK: Record<OpsPhase, number> = {
   ABORTING: 2,
   COMPLETE: 3,
   FAILED: 3,
+  PARTIAL: 3,
   SKIPPED: 3,
 };
 
@@ -57,19 +68,21 @@ export function jobStatusToPhase(status: JobStatus): OpsPhase {
 }
 
 function rowFromJobInfo(job: JobInfo): ProgressRow {
+  const phase = jobStatusToPhase(job.status);
+  const failed = phase === "FAILED";
   return {
     jobId: job.id,
     sourcePath: job.sourcePath,
     mediaKind: job.mediaKind,
     presetId: job.presetId,
-    phase: jobStatusToPhase(job.status),
+    phase,
     percent: job.percent,
     bytesTotal: job.originalBytes,
     originalBytes: job.originalBytes,
     resultBytes: job.resultBytes,
-    outputPath: job.outputPath,
+    outputPath: failed ? undefined : job.outputPath,
     durationMs: job.durationMs,
-    error: job.error,
+    error: job.error ? normalizeOpsError(job.error) : job.error,
   };
 }
 
@@ -84,27 +97,49 @@ function placeholderRow(jobId: string): ProgressRow {
   };
 }
 
+/** Prefer stall watchdog reason over cancel's generic "cancelled". */
+function mergeOpsError(
+  existing: string | undefined,
+  incoming: string | undefined,
+): string | undefined {
+  if (
+    existing === ENCODER_STALL_ERROR &&
+    (incoming === undefined || incoming === "cancelled")
+  ) {
+    return ENCODER_STALL_ERROR;
+  }
+  return incoming ?? existing;
+}
+
 /** Merge JobInfo into an existing row without regressing event-driven progress. */
 export function mergeJobRow(
   existing: ProgressRow,
   fromJob: ProgressRow,
 ): ProgressRow {
   const keepEventPhase = PHASE_RANK[existing.phase] > PHASE_RANK[fromJob.phase];
+  const phase = keepEventPhase ? existing.phase : fromJob.phase;
+  // FAILED must never retain a prior success outputPath (`??` would keep it).
+  const outputPath =
+    phase === "FAILED"
+      ? undefined
+      : (fromJob.outputPath ?? existing.outputPath);
   return {
     ...existing,
     ...fromJob,
     sourcePath: fromJob.sourcePath || existing.sourcePath,
     mediaKind: fromJob.mediaKind || existing.mediaKind,
     presetId: fromJob.presetId || existing.presetId,
-    phase: keepEventPhase ? existing.phase : fromJob.phase,
+    phase,
     percent: Math.max(existing.percent, fromJob.percent),
     bytesProcessed: fromJob.bytesProcessed ?? existing.bytesProcessed,
     bytesTotal: fromJob.bytesTotal ?? existing.bytesTotal,
-    outputPath: fromJob.outputPath ?? existing.outputPath,
+    outputPath,
     originalBytes: fromJob.originalBytes ?? existing.originalBytes,
     resultBytes: fromJob.resultBytes ?? existing.resultBytes,
     durationMs: fromJob.durationMs ?? existing.durationMs,
-    error: fromJob.error ?? existing.error,
+    error: mergeOpsError(existing.error, fromJob.error),
+    // JobInfo-derived rows omit batchGeneration — keep the admit tag.
+    batchGeneration: existing.batchGeneration ?? fromJob.batchGeneration,
   };
 }
 
@@ -135,20 +170,20 @@ export function markFailed(
   rows: ProgressRow[],
   jobId: string,
   error: string,
+  options?: { cleanupPending?: boolean },
 ): ProgressRow[] {
+  const terse = normalizeOpsError(error);
   const idx = rows.findIndex((r) => r.jobId === jobId);
-  if (idx === -1) {
-    return [
-      ...rows,
-      {
-        ...placeholderRow(jobId),
-        phase: "FAILED",
-        error,
-      },
-    ];
-  }
+  // Unknown ids stay unknown — never invent a placeholder FAILED row.
+  if (idx === -1) return rows;
   const copy = rows.slice();
-  copy[idx] = { ...rows[idx], phase: "FAILED", error };
+  copy[idx] = {
+    ...rows[idx],
+    phase: "FAILED",
+    error: terse,
+    outputPath: undefined,
+    ...(options?.cleanupPending ? { cleanupPending: true } : {}),
+  };
   return copy;
 }
 
@@ -160,11 +195,37 @@ function rejectMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
 }
 
+/**
+ * compress_cancel NotCancellable — job already Complete/Failed on the backend.
+ * Leave non-terminal HUD rows for the Complete/Failed event; do not invent FAILED.
+ */
+function isAlreadyFinishedCancelReject(reason: unknown): boolean {
+  const msg = rejectMessage(reason).toLowerCase();
+  return (
+    msg.includes("already finished") ||
+    msg.includes("already terminal") ||
+    msg.includes("not cancellable")
+  );
+}
+
+/**
+ * True when compress_cancel returned for a job that was already running — the
+ * worker still owns StagingCleanup and will emit Failed after release. Keep
+ * ABORTING (RETRY gated) until that event; queued-only cancels never emit.
+ */
+export function awaitFailedEventAfterCancel(
+  phaseAtCancel: OpsPhase | undefined,
+): boolean {
+  return phaseAtCancel === "COMPRESSING" || phaseAtCancel === "ABORTING";
+}
+
 /** Apply compress_cancel PromiseSettled results — never leave rows stuck in ABORTING. */
 export function applyCancelResults(
   rows: ProgressRow[],
   ids: string[],
   results: PromiseSettledResult<JobInfo>[],
+  /** Phase before markAborting; running jobs stay ABORTING until Failed event. */
+  phasesAtCancel?: ReadonlyMap<string, OpsPhase>,
 ): ProgressRow[] {
   let next = rows;
   for (let i = 0; i < ids.length; i++) {
@@ -172,12 +233,25 @@ export function applyCancelResults(
     const result = results[i];
     if (!result) continue;
     if (result.status === "fulfilled") {
+      const existing = next.find((r) => r.jobId === id);
+      // Event already terminalized (e.g. Failed after cleanup) — don't clobber.
+      if (existing && isTerminalPhase(existing.phase)) continue;
+      if (
+        phasesAtCancel &&
+        awaitFailedEventAfterCancel(phasesAtCancel.get(id))
+      ) {
+        // Still cleaning up reserved/.partial — leave ABORTING for RETRY gate.
+        continue;
+      }
       next = upsertJob(next, result.value);
     } else {
       const existing = next.find((r) => r.jobId === id);
       // Cancel often rejects with "job already finished" after Complete/Failed;
       // do not clobber a correct terminal phase.
       if (existing && isTerminalPhase(existing.phase)) continue;
+      // Reject-before-Complete: leave ABORTING for the terminal event. Marking
+      // FAILED here permanently blocks Complete (and unlocks RETRY early).
+      if (isAlreadyFinishedCancelReject(result.reason)) continue;
       next = markFailed(next, id, rejectMessage(result.reason));
     }
   }
@@ -186,7 +260,7 @@ export function applyCancelResults(
 
 /**
  * Surface error for abortAll: only real cancel failures on still-active/ABORTING
- * rows. Ignore "job already finished" (and similar) when the row is already terminal.
+ * rows. Ignore already-finished cancel races (terminal event owns the outcome).
  */
 export function abortSurfaceErrorFromCancelResults(
   rows: ProgressRow[],
@@ -196,6 +270,7 @@ export function abortSurfaceErrorFromCancelResults(
   for (let i = 0; i < ids.length; i++) {
     const result = results[i];
     if (!result || result.status !== "rejected") continue;
+    if (isAlreadyFinishedCancelReject(result.reason)) continue;
     const existing = rows.find((r) => r.jobId === ids[i]);
     if (existing && isTerminalPhase(existing.phase)) continue;
     return rejectMessage(result.reason);
@@ -206,7 +281,11 @@ export function abortSurfaceErrorFromCancelResults(
 export function applyCompressEvent(
   rows: ProgressRow[],
   event: CompressEvent,
+  ignoredJobIds?: ReadonlySet<string>,
 ): ProgressRow[] {
+  // DISMISS/RETRY/admit tombstones — never rehydrate dropped FAILED rows.
+  if (ignoredJobIds?.has(event.jobId)) return rows;
+
   let working = rows;
   let idx = working.findIndex((r) => r.jobId === event.jobId);
   if (idx === -1) {
@@ -219,6 +298,11 @@ export function applyCompressEvent(
 
   switch (event.type) {
     case "progress": {
+      // Abandoned encoders can still flush progress after Failed/Complete —
+      // never reopen a terminal row into COMPRESSING.
+      if (isTerminalPhase(row.phase)) {
+        return working;
+      }
       if (row.phase === "ABORTING") {
         copy[idx] = {
           ...row,
@@ -240,6 +324,16 @@ export function applyCompressEvent(
     case "log":
       return working;
     case "complete":
+      // Complete may win over ABORTING (cancel raced with a finished encode).
+      // Do not overwrite FAILED/SKIPPED/COMPLETE — late complete after failure
+      // must not resurrect a success path.
+      if (
+        row.phase === "FAILED" ||
+        row.phase === "SKIPPED" ||
+        row.phase === "COMPLETE"
+      ) {
+        return working;
+      }
       copy[idx] = {
         ...row,
         phase: "COMPLETE",
@@ -251,15 +345,25 @@ export function applyCompressEvent(
         bytesProcessed: event.resultBytes,
         bytesTotal: event.originalBytes,
         error: undefined,
+        cleanupPending: undefined,
       };
       return copy;
-    case "failed":
+    case "failed": {
+      const incoming = normalizeOpsError(event.error);
+      // Stall watchdog cancel emits Failed{"cancelled"} after cleanup — keep
+      // the stall reason if the UI already labeled it (or caller remapped).
+      const error = mergeOpsError(row.error, incoming) ?? incoming;
       copy[idx] = {
         ...row,
         phase: "FAILED",
-        error: event.error,
+        error,
+        // Incomplete / reserved outputs are never success paths.
+        outputPath: undefined,
+        // Real Failed after staging cleanup — RETRY may proceed.
+        cleanupPending: undefined,
       };
       return copy;
+    }
     default: {
       const _exhaustive: never = event;
       return _exhaustive;
@@ -273,9 +377,12 @@ export function deriveOpsPhase(rows: ProgressRow[]): OpsPhase {
   if (rows.some((r) => r.phase === "COMPRESSING" || r.phase === "AWAITING")) {
     return "COMPRESSING";
   }
-  if (rows.some((r) => r.phase === "FAILED")) return "FAILED";
+  const hasFail = rows.some((r) => r.phase === "FAILED");
+  const hasOk = rows.some((r) => r.phase === "COMPLETE");
+  if (hasFail && hasOk) return "PARTIAL";
+  if (hasFail) return "FAILED";
   if (rows.every((r) => r.phase === "SKIPPED")) return "SKIPPED";
-  if (rows.some((r) => r.phase === "SKIPPED") && !rows.some((r) => r.phase === "COMPLETE")) {
+  if (rows.some((r) => r.phase === "SKIPPED") && !hasOk) {
     return "SKIPPED";
   }
   return "COMPLETE";

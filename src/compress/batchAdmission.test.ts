@@ -5,6 +5,19 @@ import {
 } from "./batchAdmission";
 
 describe("createBatchAdmissionController", () => {
+
+  it("advances summary generation on each begin() admit/retry", () => {
+    const gate = createBatchAdmissionController();
+    const first = gate.begin();
+    const second = gate.begin();
+    const third = gate.begin();
+    expect(second).toBe(first + 1);
+    expect(third).toBe(second + 1);
+    expect(gate.isCurrent(first)).toBe(false);
+    expect(gate.isCurrent(second)).toBe(false);
+    expect(gate.isCurrent(third)).toBe(true);
+  });
+
   it("keeps begin() token current until abort()", () => {
     const gate = createBatchAdmissionController();
     const token = gate.begin();

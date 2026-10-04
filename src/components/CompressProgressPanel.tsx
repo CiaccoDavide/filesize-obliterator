@@ -1,4 +1,5 @@
 import { formatBytes } from "../intake/formatBytes";
+import type { BatchSummary } from "../compress/batchSummary";
 import {
   formatByteMeter,
   sizeDeltaLabel,
@@ -17,10 +18,13 @@ import { RevealRowActions } from "./RevealRowActions";
 type Props = {
   rows: ProgressRow[];
   phase: OpsPhase;
+  batchSummary: BatchSummary | null;
   error: string | null;
   starting: boolean;
   canAbort: boolean;
   aborting: boolean;
+  canRetryFailed: boolean;
+  canDismissFailed: boolean;
   stagedCount: number;
   estimating?: boolean;
   onStart: () => void;
@@ -28,6 +32,8 @@ type Props = {
   onAbort: () => void;
   onCancelOne: (jobId: string) => void;
   onClearFinished: () => void;
+  onRetryFailed: () => void;
+  onDismissFailed: () => void;
   onPreviewImage?: (row: ProgressRow) => void;
   onReveal?: (
     action: RevealAction,
@@ -36,15 +42,13 @@ type Props = {
 };
 
 function rowCancellable(row: ProgressRow): boolean {
-  return (
-    row.phase === "AWAITING" ||
-    row.phase === "COMPRESSING"
-  );
+  return row.phase === "AWAITING" || row.phase === "COMPRESSING";
 }
 
 function phaseTone(phase: OpsPhase): "ok" | "warn" | "danger" {
   if (phase === "FAILED") return "danger";
-  if (phase === "ABORTING" || phase === "SKIPPED") return "warn";
+  if (phase === "PARTIAL" || phase === "ABORTING" || phase === "SKIPPED")
+    return "warn";
   return "ok";
 }
 
@@ -69,13 +73,20 @@ function rowDetail(row: ProgressRow): string {
   return formatByteMeter(row.bytesProcessed, row.bytesTotal, formatBytes);
 }
 
+function summaryLine(summary: BatchSummary): string {
+  return `OK ${summary.succeeded} · FAIL ${summary.failed}`;
+}
+
 export function CompressProgressPanel({
   rows,
   phase,
+  batchSummary,
   error,
   starting,
   canAbort,
   aborting,
+  canRetryFailed,
+  canDismissFailed,
   stagedCount,
   estimating = false,
   onStart,
@@ -83,6 +94,8 @@ export function CompressProgressPanel({
   onAbort,
   onCancelOne,
   onClearFinished,
+  onRetryFailed,
+  onDismissFailed,
   onPreviewImage,
   onReveal,
 }: Props) {
@@ -101,6 +114,11 @@ export function CompressProgressPanel({
             )}
             {phase}
           </p>
+          {batchSummary ? (
+            <p className="compress-batch-summary mono" role="status">
+              {summaryLine(batchSummary)}
+            </p>
+          ) : null}
           {error ? (
             <p className="compress-error mono" role="alert">
               {error}
@@ -183,6 +201,16 @@ export function CompressProgressPanel({
               "ABORT"
             )}
           </button>
+          {canRetryFailed ? (
+            <button type="button" className="btn" onClick={onRetryFailed}>
+              RETRY FAILED
+            </button>
+          ) : null}
+          {canDismissFailed ? (
+            <button type="button" className="btn" onClick={onDismissFailed}>
+              DISMISS FAIL
+            </button>
+          ) : null}
           {hasFinished ? (
             <button type="button" className="btn" onClick={onClearFinished}>
               CLEAR DONE
@@ -190,6 +218,17 @@ export function CompressProgressPanel({
           ) : null}
         </div>
       </div>
+
+      {batchSummary && batchSummary.failures.length > 0 ? (
+        <ul className="compress-failure-log mono" aria-label="Batch failures">
+          {batchSummary.failures.map((f) => (
+            <li key={`${f.path}:${f.reason}`}>
+              <span className="compress-fail-path">{f.path}</span>
+              <span className="compress-fail-reason">{f.reason}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
 
       {rows.length === 0 ? (
         <p className="compress-empty mono">AWAITING JOBS</p>

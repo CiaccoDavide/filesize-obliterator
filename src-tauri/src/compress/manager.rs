@@ -1,10 +1,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
 
@@ -24,6 +26,132 @@ use super::video_encode::encode_video;
 pub const DEFAULT_MAX_CONCURRENT_JOBS: usize = 2;
 /// Absolute ceiling — settings clamp into this range.
 pub const ABS_MAX_CONCURRENT_JOBS: usize = 4;
+
+/// After cancel, wait this long for cooperative encoder exit before force-failing.
+const CANCEL_FORCE_FAIL_GRACE: Duration = Duration::from_secs(8);
+/// Wall clock for image/audio/pdf — bounds hung encodes that emit no progress.
+const NON_VIDEO_ENCODE_WALL: Duration = Duration::from_secs(15 * 60);
+
+/// Result of a supervised encode. When `abandoned` is `Some`, the encode thread
+/// may still be writing staging paths — join it before releasing/dropping cleanup.
+struct SupervisedEncodeOutcome {
+    result: Result<(), String>,
+    abandoned: Option<thread::JoinHandle<()>>,
+}
+
+impl SupervisedEncodeOutcome {
+    fn finished(result: Result<(), String>) -> Self {
+        Self {
+            result,
+            abandoned: None,
+        }
+    }
+
+    fn force_failed(error: String, join: thread::JoinHandle<()>) -> Self {
+        Self {
+            result: Err(error),
+            abandoned: Some(join),
+        }
+    }
+}
+
+/// Run `encode` on a worker thread; return cancelled/stalled if it ignores cancel
+/// or exceeds `wall` (so the UI cannot stay COMPRESSING / ABORTING forever).
+fn supervised_encode<F>(
+    cancel: &AtomicBool,
+    wall: Duration,
+    encode: F,
+) -> SupervisedEncodeOutcome
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    supervised_encode_with(cancel, wall, CANCEL_FORCE_FAIL_GRACE, encode)
+}
+
+fn supervised_encode_with<F>(
+    cancel: &AtomicBool,
+    wall: Duration,
+    cancel_grace: Duration,
+    encode: F,
+) -> SupervisedEncodeOutcome
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let result = match catch_unwind(AssertUnwindSafe(encode)) {
+            Ok(inner) => inner,
+            Err(_) => Err("encoder crashed".into()),
+        };
+        let _ = tx.send(result);
+    });
+    let started = Instant::now();
+    let mut cancel_since: Option<Instant> = None;
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(result) => {
+                let _ = handle.join();
+                return SupervisedEncodeOutcome::finished(result);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if cancel.load(Ordering::SeqCst) {
+                    let since = cancel_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= cancel_grace {
+                        return SupervisedEncodeOutcome::force_failed(
+                            "cancelled".into(),
+                            handle,
+                        );
+                    }
+                }
+                if started.elapsed() >= wall {
+                    cancel.store(true, Ordering::SeqCst);
+                    match rx.recv_timeout(cancel_grace) {
+                        Ok(result) => {
+                            let _ = handle.join();
+                            return SupervisedEncodeOutcome::finished(result);
+                        }
+                        Err(_) => {
+                            return SupervisedEncodeOutcome::force_failed(
+                                "encoder stalled — no progress".into(),
+                                handle,
+                            );
+                        }
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = handle.join();
+                return SupervisedEncodeOutcome::finished(Err("encoder crashed".into()));
+            }
+        }
+    }
+}
+
+/// Join any abandoned encode thread, drop armed staging, then run `finish`.
+/// Failed/Cancelled must not emit while `.partial` / reserved may still exist —
+/// RETRY stays gated (ABORTING/COMPRESSING) until cleanup completes.
+fn finish_after_staging_cleanup<F>(
+    staging: StagingCleanup,
+    abandoned: Option<thread::JoinHandle<()>>,
+    finish: F,
+) where
+    F: FnOnce() + Send + 'static,
+{
+    match abandoned {
+        Some(join) => {
+            thread::spawn(move || {
+                let _ = join.join();
+                drop(staging);
+                finish();
+            });
+        }
+        None => {
+            let mut staging = staging;
+            staging.release();
+            finish();
+        }
+    }
+}
 
 struct JobRecord {
     info: JobInfo,
@@ -510,6 +638,75 @@ fn fail_job(manager: &JobManager, app: &AppHandle, job_id: String, error: String
     );
 }
 
+#[cfg(test)]
+fn job_is_active(manager: &JobManager, job_id: &str) -> bool {
+    manager
+        .with_job(job_id, |record| {
+            Ok(matches!(
+                record.info.status,
+                JobStatus::Queued | JobStatus::Running
+            ))
+        })
+        .unwrap_or(false)
+}
+
+/// True when a terminal Failed event is still required for the UI (active work, or
+/// Cancelled after IPC cancel where the worker must still surface cleanup).
+fn job_needs_failed_event(manager: &JobManager, job_id: &str) -> bool {
+    manager
+        .with_job(job_id, |record| {
+            Ok(matches!(
+                record.info.status,
+                JobStatus::Queued | JobStatus::Running | JobStatus::Cancelled
+            ))
+        })
+        .unwrap_or(false)
+}
+
+/// Fail when the job still needs a terminal Failed event (panic / stall recovery).
+/// Includes Cancelled so panic-after-cancel cannot leave the UI stuck in ABORTING.
+fn fail_job_if_active(manager: &JobManager, app: &AppHandle, job_id: String, error: String) {
+    if job_needs_failed_event(manager, &job_id) {
+        fail_job(manager, app, job_id, error);
+    }
+}
+
+/// Temp/partial + reserved final path — removed on drop unless disarmed after promote.
+struct StagingCleanup {
+    partial: PathBuf,
+    reserved: PathBuf,
+    armed: bool,
+}
+
+impl StagingCleanup {
+    fn new(partial: PathBuf, reserved: PathBuf) -> Self {
+        Self {
+            partial,
+            reserved,
+            armed: true,
+        }
+    }
+
+    fn release(&mut self) {
+        let _ = fs::remove_file(&self.partial);
+        let _ = fs::remove_file(&self.reserved);
+        self.armed = false;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagingCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.partial);
+            let _ = fs::remove_file(&self.reserved);
+        }
+    }
+}
+
 fn cancel_job(manager: &JobManager, app: &AppHandle, job_id: String) {
     let error = "cancelled".to_string();
     let _ = manager.mark_failed(&job_id, error.clone());
@@ -644,11 +841,7 @@ fn run_job(
         parent.join(format!("{base}.{job_id}.partial"))
     };
     let _ = fs::write(&partial_path, b"");
-
-    let release_reserved = || {
-        let _ = fs::remove_file(&partial_path);
-        let _ = fs::remove_file(&output_path);
-    };
+    let mut staging = StagingCleanup::new(partial_path.clone(), output_path.clone());
 
     let report_progress = |percent: f64| -> bool {
         if cancel.load(Ordering::SeqCst) || manager.is_cancel_requested(&job_id) {
@@ -671,94 +864,160 @@ fn run_job(
     };
 
     if !report_progress(0.0) {
-        release_reserved();
+        staging.release();
         cancel_job(&manager, &app, job_id);
         return;
     }
 
-    let encode_result = match media_kind {
+    // catch_unwind: encoder/process panic must not leave the job stuck in Running.
+    // supervised_encode: hung image/audio/pdf (or silent ffmpeg) cannot block forever —
+    // cancel grace / wall timeout force a terminal error so Failed always reaches the UI.
+    let encode_outcome = catch_unwind(AssertUnwindSafe(|| match media_kind {
         MediaKind::Image => {
             if !report_progress(20.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+                return SupervisedEncodeOutcome::finished(Err("cancelled".to_string()));
             }
-            let result = encode_image(&source, &preset_id, &partial_path, strip_metadata);
-            if result.is_ok() && !report_progress(90.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+            let source = source.clone();
+            let preset_id = preset_id.clone();
+            let partial_path = partial_path.clone();
+            let outcome = supervised_encode(cancel.as_ref(), NON_VIDEO_ENCODE_WALL, move || {
+                encode_image(&source, &preset_id, &partial_path, strip_metadata)
+            });
+            if outcome.result.is_ok() && !report_progress(90.0) {
+                return SupervisedEncodeOutcome::finished(Err("cancelled".to_string()));
             }
-            result
+            outcome
         }
         MediaKind::Audio => {
             if !report_progress(20.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+                return SupervisedEncodeOutcome::finished(Err("cancelled".to_string()));
             }
-            let result = encode_audio(&source, &preset_id, &partial_path, Some(cancel.as_ref()));
-            if result.is_ok() && !report_progress(90.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+            let source = source.clone();
+            let preset_id = preset_id.clone();
+            let partial_path = partial_path.clone();
+            let cancel_flag = Arc::clone(&cancel);
+            let outcome = supervised_encode(cancel.as_ref(), NON_VIDEO_ENCODE_WALL, move || {
+                encode_audio(
+                    &source,
+                    &preset_id,
+                    &partial_path,
+                    Some(cancel_flag.as_ref()),
+                )
+            });
+            if outcome.result.is_ok() && !report_progress(90.0) {
+                return SupervisedEncodeOutcome::finished(Err("cancelled".to_string()));
             }
-            result
+            outcome
         }
         MediaKind::Video => {
             if !report_progress(1.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+                return SupervisedEncodeOutcome::finished(Err("cancelled".to_string()));
             }
-            let mut on_progress = |percent: f64| -> bool {
-                // Map encoder 0..=99 into job 1..=95 so finalize can still emit 100.
-                let mapped = (percent.clamp(0.0, 99.0) * 0.95).clamp(1.0, 95.0);
-                report_progress(mapped)
-            };
-            let result = encode_video(
-                &source,
-                &preset_id,
-                &partial_path,
-                Some(cancel.as_ref()),
-                Some(&mut on_progress),
-                strip_metadata,
-            );
-            if result.is_ok() && !report_progress(96.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+            let source = source.clone();
+            let preset_id = preset_id.clone();
+            let partial_path = partial_path.clone();
+            let cancel_flag = Arc::clone(&cancel);
+            let manager_progress = manager.clone();
+            let app_progress = app.clone();
+            let job_id_progress = job_id.clone();
+            // Long wall: video uses dense progress + cancel-kill; this is a last-resort bound.
+            let video_wall = Duration::from_secs(6 * 60 * 60);
+            let outcome = supervised_encode(cancel.as_ref(), video_wall, move || {
+                let report = |percent: f64| -> bool {
+                    if cancel_flag.load(Ordering::SeqCst)
+                        || manager_progress.is_cancel_requested(&job_id_progress)
+                    {
+                        return false;
+                    }
+                    if !manager_progress
+                        .mark_progress(&job_id_progress, percent)
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                    let bytes_processed = ((percent / 100.0) * original_bytes as f64) as u64;
+                    emit(
+                        &app_progress,
+                        CompressEvent::Progress {
+                            job_id: job_id_progress.clone(),
+                            percent,
+                            bytes_processed: Some(bytes_processed),
+                            bytes_total: Some(original_bytes),
+                        },
+                    );
+                    true
+                };
+                let mut on_progress = |percent: f64| -> bool {
+                    // Map encoder 0..=99 into job 1..=95 so finalize can still emit 100.
+                    let mapped = (percent.clamp(0.0, 99.0) * 0.95).clamp(1.0, 95.0);
+                    report(mapped)
+                };
+                encode_video(
+                    &source,
+                    &preset_id,
+                    &partial_path,
+                    Some(cancel_flag.as_ref()),
+                    Some(&mut on_progress),
+                    strip_metadata,
+                )
+            });
+            if outcome.result.is_ok() && !report_progress(96.0) {
+                return SupervisedEncodeOutcome::finished(Err("cancelled".to_string()));
             }
-            result
+            outcome
         }
         MediaKind::Pdf => {
             if !report_progress(20.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+                return SupervisedEncodeOutcome::finished(Err("cancelled".to_string()));
             }
-            let result = encode_pdf(&source, &preset_id, &partial_path, Some(cancel.as_ref()));
-            if result.is_ok() && !report_progress(90.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+            let source = source.clone();
+            let preset_id = preset_id.clone();
+            let partial_path = partial_path.clone();
+            let cancel_flag = Arc::clone(&cancel);
+            let outcome = supervised_encode(cancel.as_ref(), NON_VIDEO_ENCODE_WALL, move || {
+                encode_pdf(
+                    &source,
+                    &preset_id,
+                    &partial_path,
+                    Some(cancel_flag.as_ref()),
+                )
+            });
+            if outcome.result.is_ok() && !report_progress(90.0) {
+                return SupervisedEncodeOutcome::finished(Err("cancelled".to_string()));
             }
-            result
+            outcome
+        }
+    }));
+
+    let outcome = match encode_outcome {
+        Ok(inner) => inner,
+        Err(_) => {
+            staging.release();
+            fail_job_if_active(
+                &manager,
+                &app,
+                job_id,
+                "encoder crashed".into(),
+            );
+            return;
         }
     };
 
-    if let Err(error) = encode_result {
-        release_reserved();
-        if error == "cancelled" {
-            cancel_job(&manager, &app, job_id);
-        } else {
-            fail_job(&manager, &app, job_id, error);
-        }
+    if let Err(error) = outcome.result {
+        let manager_finish = manager.clone();
+        let app_finish = app.clone();
+        finish_after_staging_cleanup(staging, outcome.abandoned, move || {
+            if error == "cancelled" {
+                cancel_job(&manager_finish, &app_finish, job_id);
+            } else {
+                fail_job(&manager_finish, &app_finish, job_id, error);
+            }
+        });
         return;
     }
 
     if cancel.load(Ordering::SeqCst) || manager.is_cancel_requested(&job_id) {
-        release_reserved();
+        staging.release();
         cancel_job(&manager, &app, job_id);
         return;
     }
@@ -768,7 +1027,7 @@ fn run_job(
     let result_bytes = match fs::metadata(&partial_path).map(|m| m.len()) {
         Ok(n) => n,
         Err(e) => {
-            release_reserved();
+            staging.release();
             fail_job(
                 &manager,
                 &app,
@@ -782,7 +1041,7 @@ fn run_job(
     if let Err(e) = fs::rename(&partial_path, &output_path) {
         // Fallback copy if rename crosses volumes.
         if let Err(copy_err) = fs::copy(&partial_path, &output_path) {
-            release_reserved();
+            staging.release();
             fail_job(
                 &manager,
                 &app,
@@ -793,6 +1052,8 @@ fn run_job(
         }
         let _ = fs::remove_file(&partial_path);
     }
+    // Partial promoted (or copied); reserved path is the final success artifact.
+    staging.disarm();
 
     if !report_progress(100.0) {
         let _ = fs::remove_file(&output_path);
@@ -1209,6 +1470,42 @@ mod tests {
     }
 
     #[test]
+    fn staging_cleanup_removes_incomplete_outputs_on_drop() {
+        let root = std::env::temp_dir().join(format!(
+            "fo-staging-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("root");
+        let partial = root.join("out.webp.job-9.partial");
+        let reserved = root.join("out.webp");
+        fs::write(&partial, b"partial").expect("partial");
+        fs::write(&reserved, b"").expect("reserved");
+
+        {
+            let staging = StagingCleanup::new(partial.clone(), reserved.clone());
+            assert!(staging.armed);
+            // drop armed → both removed
+        }
+        assert!(!partial.exists());
+        assert!(!reserved.exists());
+
+        fs::write(&partial, b"partial").expect("partial2");
+        fs::write(&reserved, b"final").expect("reserved2");
+        {
+            let mut staging = StagingCleanup::new(partial.clone(), reserved.clone());
+            staging.disarm();
+        }
+        assert!(partial.exists());
+        assert_eq!(fs::read(&reserved).expect("read"), b"final");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn skip_by_default_when_sidecar_and_output_exist() {
         let root = std::env::temp_dir().join(format!(
             "fo-mgr-skip-{}-{}",
@@ -1246,6 +1543,195 @@ mod tests {
         assert_eq!(info.percent, 100.0);
         assert_eq!(manager.wait_queue_len_for_test(), 0);
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fail_job_if_active_skips_already_terminal_jobs() {
+        let manager = JobManager::default();
+        let source = temp_source("terminal.bin", b"x");
+        let id = "job-terminal".to_string();
+        {
+            let mut guard = manager.inner.lock().unwrap();
+            guard.jobs.insert(
+                id.clone(),
+                JobRecord {
+                    info: JobInfo {
+                        id: id.clone(),
+                        source_path: source.to_string_lossy().into_owned(),
+                        media_kind: MediaKind::Image,
+                        preset_id: "balanced".into(),
+                        status: JobStatus::Completed,
+                        percent: 100.0,
+                        error: None,
+                        output_path: Some("/tmp/out.webp".into()),
+                        original_bytes: Some(1),
+                        result_bytes: Some(1),
+                        duration_ms: Some(1),
+                    },
+                    cancel: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        }
+        assert!(!job_is_active(&manager, &id));
+        assert!(!job_needs_failed_event(&manager, &id));
+    }
+
+    #[test]
+    fn fail_job_if_active_still_needed_after_cancel() {
+        let manager = JobManager::default();
+        let source = temp_source("cancelled.bin", b"x");
+        let id = "job-cancelled".to_string();
+        {
+            let mut guard = manager.inner.lock().unwrap();
+            guard.jobs.insert(
+                id.clone(),
+                JobRecord {
+                    info: JobInfo {
+                        id: id.clone(),
+                        source_path: source.to_string_lossy().into_owned(),
+                        media_kind: MediaKind::Image,
+                        preset_id: "balanced".into(),
+                        status: JobStatus::Cancelled,
+                        percent: 40.0,
+                        error: Some("cancelled".into()),
+                        output_path: None,
+                        original_bytes: Some(1),
+                        result_bytes: None,
+                        duration_ms: None,
+                    },
+                    cancel: Arc::new(AtomicBool::new(true)),
+                },
+            );
+        }
+        // Cancel IPC already marked Cancelled — panic/stall recovery must still emit Failed.
+        assert!(!job_is_active(&manager, &id));
+        assert!(job_needs_failed_event(&manager, &id));
+    }
+
+    #[test]
+    fn supervised_encode_force_fails_when_cancel_ignored() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (block_tx, block_rx) = mpsc::channel::<()>();
+        let cancel_w = Arc::clone(&cancel);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            cancel_w.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let grace = Duration::from_millis(80);
+        let outcome = supervised_encode_with(
+            cancel.as_ref(),
+            Duration::from_secs(60),
+            grace,
+            move || {
+                let _ = block_rx.recv();
+                Ok(())
+            },
+        );
+        assert_eq!(outcome.result, Err("cancelled".into()));
+        assert!(started.elapsed() >= grace);
+        let join = outcome.abandoned.expect("abandoned encode thread");
+        drop(block_tx); // let the abandoned encode thread exit
+        let _ = join.join();
+    }
+
+    #[test]
+    fn supervised_encode_force_fails_on_wall_timeout() {
+        let cancel = AtomicBool::new(false);
+        let (block_tx, block_rx) = mpsc::channel::<()>();
+        let grace = Duration::from_millis(80);
+        let outcome = supervised_encode_with(
+            &cancel,
+            Duration::from_millis(40),
+            grace,
+            move || {
+                let _ = block_rx.recv();
+                Ok(())
+            },
+        );
+        assert_eq!(
+            outcome.result,
+            Err("encoder stalled — no progress".into())
+        );
+        assert!(cancel.load(Ordering::SeqCst));
+        let join = outcome.abandoned.expect("abandoned encode thread");
+        drop(block_tx);
+        let _ = join.join();
+    }
+
+    #[test]
+    fn deferred_staging_cleanup_removes_paths_recreated_by_abandoned_writer() {
+        let root = std::env::temp_dir().join(format!(
+            "fo-staging-orphan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("root");
+        let partial = root.join("out.webp.job-orphan.partial");
+        let reserved = root.join("out.webp");
+        fs::write(&partial, b"").expect("partial");
+        fs::write(&reserved, b"").expect("reserved");
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (block_tx, block_rx) = mpsc::channel::<()>();
+        let cancel_w = Arc::clone(&cancel);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            cancel_w.store(true, Ordering::SeqCst);
+        });
+
+        let partial_w = partial.clone();
+        let reserved_w = reserved.clone();
+        let staging = StagingCleanup::new(partial.clone(), reserved.clone());
+        let grace = Duration::from_millis(80);
+        let outcome = supervised_encode_with(
+            cancel.as_ref(),
+            Duration::from_secs(60),
+            grace,
+            move || {
+                let _ = block_rx.recv();
+                // Orphan writer recreates staging after an eager release would have run.
+                fs::write(&partial_w, b"orphan").expect("recreate partial");
+                fs::write(&reserved_w, b"orphan").expect("recreate reserved");
+                Ok(())
+            },
+        );
+        assert_eq!(outcome.result, Err("cancelled".into()));
+
+        // Same pattern as the encode worker: emit Failed only after join + cleanup.
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_flag = Arc::clone(&finished);
+        let partial_check = partial.clone();
+        let reserved_check = reserved.clone();
+        finish_after_staging_cleanup(staging, outcome.abandoned, move || {
+            assert!(
+                !partial_check.exists(),
+                "Failed must not emit while .partial may still exist"
+            );
+            assert!(
+                !reserved_check.exists(),
+                "Failed must not emit while reserved may still exist"
+            );
+            finished_flag.store(true, Ordering::SeqCst);
+        });
+        drop(block_tx);
+
+        for _ in 0..50 {
+            if finished.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "finish (Failed emit point) must run after staging cleanup"
+        );
+        assert!(!partial.exists(), "partial must be removed after orphan exits");
+        assert!(!reserved.exists(), "reserved must be removed after orphan exits");
         let _ = fs::remove_dir_all(&root);
     }
 
