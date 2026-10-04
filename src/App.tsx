@@ -20,7 +20,7 @@ import { useCompressProgress } from "./hooks/useCompressProgress";
 import { useFileIntake } from "./hooks/useFileIntake";
 import { useLocalSettings } from "./hooks/useLocalSettings";
 import { usePresets } from "./hooks/usePresets";
-import type { MediaKind } from "./ipc/compress";
+import { compressHwEncodeStatus, type MediaKind } from "./ipc/compress";
 import { revealInFileManager } from "./ipc/reveal";
 import { useKeyboardShortcuts } from "./keyboard/useKeyboardShortcuts";
 import type { RevealAction } from "./reveal/actions";
@@ -61,6 +61,7 @@ function App() {
   );
   /** When on, re-encode even if source+preset already has a `_compressed` output. */
   const [forceReencode, setForceReencode] = useState(false);
+  const [hwStatus, setHwStatus] = useState<string | null>(null);
   const [keysOpen, setKeysOpen] = useState(false);
   /** Operator reopened BRIEFING after ACK (does not clear briefingSeen). */
   const [briefingHelpRequested, setBriefingHelpRequested] = useState(false);
@@ -105,6 +106,7 @@ function App() {
         if (compress.canAbort || compress.starting || staged.length === 0) return;
         void compress.startStaged(staged, {
           stripMetadata: local.settings.stripMetadata,
+          preferHardware: local.settings.preferHardware,
           force: forceReencode,
         });
       },
@@ -123,6 +125,7 @@ function App() {
       compress,
       staged,
       local.settings.stripMetadata,
+      local.settings.preferHardware,
       forceReencode,
       focusDropZone,
       openSettings,
@@ -171,13 +174,15 @@ function App() {
 
     async function loadBackendStatus() {
       try {
-        const [appInfo, pong] = await Promise.all([
+        const [appInfo, pong, hw] = await Promise.all([
           invoke<AppInfo>("app_info"),
           invoke<string>("ping"),
+          compressHwEncodeStatus().catch(() => "HW: UNAVAILABLE"),
         ]);
         if (!cancelled) {
           setInfo(appInfo);
           setPingResult(pong);
+          setHwStatus(hw);
         }
       } catch (err: unknown) {
         if (!cancelled) {
@@ -318,8 +323,10 @@ function App() {
             <SettingsPanel
               settings={local.settings}
               disabled={!local.loaded}
+              hwStatus={hwStatus}
               onConcurrency={local.setConcurrency}
               onStripMetadata={local.setStripMetadata}
+              onPreferHardware={local.setPreferHardware}
               onUiDensity={local.setUiDensity}
             />
           </div>
@@ -366,6 +373,7 @@ function App() {
             onStart={() =>
               void compress.startStaged(staged, {
                 stripMetadata: local.settings.stripMetadata,
+                preferHardware: local.settings.preferHardware,
                 force: forceReencode,
               })
             }

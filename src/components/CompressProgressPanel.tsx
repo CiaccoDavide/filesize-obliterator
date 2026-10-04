@@ -60,7 +60,8 @@ function rowDetail(row: ProgressRow): string {
       formatBytes,
     );
     const out = row.outputPath ?? "—";
-    return delta ? `${out} · ${delta}` : out;
+    const base = delta ? `${out} · ${delta}` : out;
+    return row.statusMessage ? `${base} · ${row.statusMessage}` : base;
   }
   if (row.phase === "SKIPPED") {
     const reason = row.error ?? "already compressed for this preset";
@@ -70,7 +71,8 @@ function rowDetail(row: ProgressRow): string {
   if (row.phase === "FAILED" && row.error) {
     return row.error;
   }
-  return formatByteMeter(row.bytesProcessed, row.bytesTotal, formatBytes);
+  const meter = formatByteMeter(row.bytesProcessed, row.bytesTotal, formatBytes);
+  return row.statusMessage ? `${row.statusMessage} · ${meter}` : meter;
 }
 
 function summaryLine(summary: BatchSummary): string {

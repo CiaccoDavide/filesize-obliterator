@@ -8,16 +8,21 @@ import {
 type Props = {
   settings: AppSettings;
   disabled?: boolean;
+  /** Offline probe result: `HW: READY` or `HW: UNAVAILABLE`. */
+  hwStatus?: string | null;
   onConcurrency: (n: number) => void;
   onStripMetadata: (on: boolean) => void;
+  onPreferHardware: (on: boolean) => void;
   onUiDensity: (density: UiDensity) => void;
 };
 
 export function SettingsPanel({
   settings,
   disabled = false,
+  hwStatus = null,
   onConcurrency,
   onStripMetadata,
+  onPreferHardware,
   onUiDensity,
 }: Props) {
   return (
@@ -65,6 +70,37 @@ export function SettingsPanel({
         data-testid="strip-metadata-payload"
       >
         compress_start.stripMetadata={String(settings.stripMetadata)}
+      </p>
+
+      <label className="hud-toggle">
+        <input
+          type="checkbox"
+          checked={settings.preferHardware}
+          disabled={disabled}
+          onChange={(e) => onPreferHardware(e.target.checked)}
+        />
+        <span className="hud-toggle-label">Prefer hardware</span>
+        <span className="mono hud-toggle-state">
+          {settings.preferHardware ? "ON" : "OFF"}
+        </span>
+      </label>
+      <p className="hud-toggle-hint">
+        {settings.preferHardware
+          ? "Use VideoToolbox / NVENC / QSV / AMF when a local ffmpeg HW session can init; soft-fallback to libx264."
+          : "Always encode video with software libx264."}
+      </p>
+      <p
+        className="hud-toggle-hint mono"
+        data-testid="prefer-hardware-payload"
+      >
+        compress_start.preferHardware={String(settings.preferHardware)}
+      </p>
+      <p
+        className="hud-toggle-hint mono"
+        data-testid="hw-encode-status"
+        role="status"
+      >
+        {hwStatus ?? "HW: —"}
       </p>
 
       <div className="settings-density" role="group" aria-label="UI density">

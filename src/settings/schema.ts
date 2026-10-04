@@ -21,6 +21,8 @@ export type AppSettings = {
   /** Queue worker cap applied to JobManager on load / change. */
   concurrency: number;
   stripMetadata: boolean;
+  /** Prefer platform HW video encode when available (falls back to software). */
+  preferHardware: boolean;
   uiDensity: UiDensity;
   /** Last logical window size; null when never captured. */
   windowSize: WindowSize | null;
@@ -38,6 +40,7 @@ export function defaultSettings(): AppSettings {
     defaultPresets: {},
     concurrency: DEFAULT_CONCURRENCY,
     stripMetadata: true,
+    preferHardware: true,
     uiDensity: "compact",
     windowSize: null,
     briefingSeen: false,
@@ -112,6 +115,10 @@ export function parseSettings(raw: unknown): AppSettings {
       typeof obj.stripMetadata === "boolean"
         ? obj.stripMetadata
         : defaults.stripMetadata,
+    preferHardware:
+      typeof obj.preferHardware === "boolean"
+        ? obj.preferHardware
+        : defaults.preferHardware,
     uiDensity: parseUiDensity(obj.uiDensity),
     windowSize:
       obj.windowSize === undefined
