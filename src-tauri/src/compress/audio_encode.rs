@@ -141,7 +141,10 @@ fn decode_to_pcm(source: &Path) -> Result<PcmTrack, String> {
             {
                 break;
             }
-            Err(SymphoniaError::IoError(_)) => break,
+            Err(SymphoniaError::IoError(e)) => {
+                // Mid-stream IO failures are not EOF — fail instead of truncating PCM.
+                return Err(format!("unsupported or corrupt audio: {e}"));
+            }
             Err(e) => {
                 return Err(format!("unsupported or corrupt audio: {e}"));
             }
@@ -426,5 +429,25 @@ mod tests {
         assert!(missing.starts_with("missing codec"));
         assert!(bad.starts_with("unsupported or corrupt"));
         assert!(!bad.contains("missing codec"));
+    }
+
+    /// Runtime: allowed container (.m4a) with unbundled codec (ALAC) → missing codec, not corrupt.
+    #[test]
+    fn alac_m4a_fails_as_missing_codec() {
+        let src = fixture("tone-alac.m4a");
+        assert!(src.is_file(), "missing fixture {}", src.display());
+        let dir = temp_dir("alac-missing");
+        let out = dir.join("out.mp3");
+        let err = encode_audio(&src, AUDIO_BALANCED, &out).expect_err("ALAC must fail");
+        assert!(
+            err.contains("missing codec"),
+            "expected missing codec, got: {err}"
+        );
+        assert!(
+            !err.contains("unsupported or corrupt"),
+            "ALAC must not look like bad input: {err}"
+        );
+        assert!(!out.exists() || fs::metadata(&out).map(|m| m.len()).unwrap_or(0) == 0);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
