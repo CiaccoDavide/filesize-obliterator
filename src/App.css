@@ -262,6 +262,38 @@
   line-height: 1.4;
 }
 
+.hud-toggle input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+  height: 0.35rem;
+}
+
+.settings-density {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.settings-density .preset-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+}
+
+.app-shell.density-compact .setup {
+  gap: 0.55rem;
+}
+
+.app-shell.density-regular .setup {
+  gap: 1rem;
+}
+
+.app-shell.density-regular .setup-surface,
+.app-shell.density-regular .setup-header {
+  padding: 1.45rem 1.55rem;
+}
+
 /* Preset alternatives — square segment controls, not pills */
 .preset-panel,
 .compress-panel {
