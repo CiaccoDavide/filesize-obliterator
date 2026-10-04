@@ -102,6 +102,7 @@ function App() {
   function handlePreviewImage(row: ProgressRow) {
     if (!row.outputPath) return;
     setImagePreview({
+      jobId: row.jobId,
       sourcePath: row.sourcePath,
       outputPath: row.outputPath,
       originalBytes: row.originalBytes,

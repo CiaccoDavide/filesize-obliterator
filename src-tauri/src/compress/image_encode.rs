@@ -111,6 +111,18 @@ fn webp_quality_for_preset(target: ImageEncodeTarget) -> f32 {
     }
 }
 
+fn preview_temp_path(ext: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "fo-img-preview-{}-{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        ext
+    ))
+}
+
 fn decode_heic_to_temp_png(source: &Path) -> Result<PathBuf, String> {
     if !heic_decode_available() {
         return Err(format!(
@@ -127,14 +139,7 @@ fn decode_heic_to_temp_png(source: &Path) -> Result<PathBuf, String> {
         )
     })?;
 
-    let tmp = std::env::temp_dir().join(format!(
-        "fo-heic-{}-{}.png",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
+    let tmp = preview_temp_path("png");
 
     let output = Command::new(&sips)
         .args(["-s", "format", "png"])
@@ -155,6 +160,51 @@ fn decode_heic_to_temp_png(source: &Path) -> Result<PathBuf, String> {
         ));
     }
     Ok(tmp)
+}
+
+fn rasterize_still_to_preview_png(source: &Path) -> Result<PathBuf, String> {
+    let (mut img, orientation, _) = open_image(source)?;
+    img.apply_orientation(orientation);
+    let tmp = preview_temp_path("png");
+    img.save(&tmp)
+        .map_err(|e| format!("preview rasterize failed: {e}"))?;
+    Ok(tmp)
+}
+
+fn copy_to_preview_temp(source: &Path, ext: &str) -> Result<PathBuf, String> {
+    let tmp = preview_temp_path(ext);
+    std::fs::copy(source, &tmp).map_err(|e| format!("preview copy failed: {e}"))?;
+    Ok(tmp)
+}
+
+/// True when a webview `<img>` typically cannot decode the container offline.
+pub fn needs_webview_raster(path: &Path) -> bool {
+    matches!(
+        extension_lower(path).as_str(),
+        "tif" | "tiff" | "heic" | "heif"
+    )
+}
+
+/// Materialize a webview-decodable temp preview (png/jpeg/gif/webp/bmp).
+///
+/// TIFF uses the bundled `image` decoder; HEIC/HEIF uses the macOS `sips` path.
+/// Web-native formats are copied into a temp file so asset grants can be revoked
+/// by deleting the temp (Tauri scope cannot unlist an allow).
+pub fn prepare_preview_raster(source: &Path) -> Result<PathBuf, String> {
+    if !source.is_file() {
+        return Err("preview path is not a readable file".into());
+    }
+    let ext = extension_lower(source);
+    if needs_webview_raster(source) {
+        return match ext.as_str() {
+            "heic" | "heif" => decode_heic_to_temp_png(source),
+            _ => rasterize_still_to_preview_png(source),
+        };
+    }
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" => copy_to_preview_temp(source, &ext),
+        _ => rasterize_still_to_preview_png(source),
+    }
 }
 
 struct GifFrameData {
@@ -633,6 +683,39 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(!out.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_preview_raster_tiff_to_png() {
+        let dir = temp_dir("preview-tiff");
+        let src = dir.join("shot.tiff");
+        write_gradient_tiff(&src, 32, 24);
+        assert!(needs_webview_raster(&src));
+        let preview = prepare_preview_raster(&src).expect("rasterize tiff");
+        assert_ne!(preview, src);
+        assert_eq!(
+            preview.extension().and_then(|e| e.to_str()),
+            Some("png")
+        );
+        assert!(preview.is_file());
+        let decoded = image::open(&preview).expect("open preview png");
+        assert_eq!(decoded.width(), 32);
+        assert_eq!(decoded.height(), 24);
+        let _ = fs::remove_file(&preview);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepare_preview_raster_copies_png() {
+        let dir = temp_dir("preview-png");
+        let src = dir.join("shot.png");
+        write_gradient_png(&src, 40, 30);
+        assert!(!needs_webview_raster(&src));
+        let preview = prepare_preview_raster(&src).expect("copy png");
+        assert_ne!(preview, src);
+        assert!(preview.is_file());
+        let _ = fs::remove_file(&preview);
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { formatBytes } from "../intake/formatBytes";
-import { previewAllowAssets } from "../ipc/preview";
+import { previewAllowAssets, previewRevokeAssets } from "../ipc/preview";
 import {
   formatImageMeta,
   localAssetUrl,
@@ -9,6 +9,7 @@ import {
 } from "../preview/imagePreview";
 
 export type ImageCompareTarget = {
+  jobId: string;
   sourcePath: string;
   outputPath: string;
   originalBytes?: number;
@@ -25,13 +26,17 @@ type Dims = { w: number; h: number } | null;
 function Pane({
   label,
   path,
+  displayPath,
   bytes,
   dims,
   onDims,
   assetReady,
 }: {
   label: string;
+  /** User-facing job path (original or compressed file). */
   path: string;
+  /** Webview-decodable path returned by preview_allow_assets. */
+  displayPath: string;
   bytes: number | undefined;
   dims: Dims;
   onDims: (d: Dims) => void;
@@ -39,18 +44,18 @@ function Pane({
 }) {
   const [loadError, setLoadError] = useState(false);
   const src = useMemo(() => {
-    if (!assetReady) return "";
+    if (!assetReady || !displayPath) return "";
     try {
-      return localAssetUrl(path, convertFileSrc);
+      return localAssetUrl(displayPath, convertFileSrc);
     } catch {
       return "";
     }
-  }, [assetReady, path]);
+  }, [assetReady, displayPath]);
   const meta = formatImageMeta(dims?.w ?? null, dims?.h ?? null, bytes, formatBytes);
 
   useEffect(() => {
     setLoadError(false);
-  }, [path, assetReady]);
+  }, [displayPath, assetReady]);
 
   const showFail = assetReady && (loadError || !src);
 
@@ -102,6 +107,8 @@ export function ImageComparePreview({ target, onClose }: Props) {
   const [assetReady, setAssetReady] = useState(false);
   const [scopeError, setScopeError] = useState(false);
   const [wipeError, setWipeError] = useState(false);
+  const [displaySource, setDisplaySource] = useState("");
+  const [displayOutput, setDisplayOutput] = useState("");
 
   useEffect(() => {
     setOriginalDims(null);
@@ -110,18 +117,27 @@ export function ImageComparePreview({ target, onClose }: Props) {
     setAssetReady(false);
     setScopeError(false);
     setWipeError(false);
+    setDisplaySource("");
+    setDisplayOutput("");
     let cancelled = false;
-    void previewAllowAssets(target.sourcePath, target.outputPath)
-      .then(() => {
-        if (!cancelled) setAssetReady(true);
+    void previewAllowAssets(target.jobId)
+      .then((assets) => {
+        if (cancelled) {
+          void previewRevokeAssets();
+          return;
+        }
+        setDisplaySource(assets.sourcePath);
+        setDisplayOutput(assets.outputPath);
+        setAssetReady(true);
       })
       .catch(() => {
         if (!cancelled) setScopeError(true);
       });
     return () => {
       cancelled = true;
+      void previewRevokeAssets();
     };
-  }, [key, target.sourcePath, target.outputPath]);
+  }, [key, target.jobId]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -135,21 +151,21 @@ export function ImageComparePreview({ target, onClose }: Props) {
   }, [onClose]);
 
   const originalSrc = useMemo(() => {
-    if (!assetReady) return "";
+    if (!assetReady || !displaySource) return "";
     try {
-      return localAssetUrl(target.sourcePath, convertFileSrc);
+      return localAssetUrl(displaySource, convertFileSrc);
     } catch {
       return "";
     }
-  }, [assetReady, target.sourcePath]);
+  }, [assetReady, displaySource]);
   const outputSrc = useMemo(() => {
-    if (!assetReady) return "";
+    if (!assetReady || !displayOutput) return "";
     try {
-      return localAssetUrl(target.outputPath, convertFileSrc);
+      return localAssetUrl(displayOutput, convertFileSrc);
     } catch {
       return "";
     }
-  }, [assetReady, target.outputPath]);
+  }, [assetReady, displayOutput]);
 
   return (
     <div
@@ -159,6 +175,7 @@ export function ImageComparePreview({ target, onClose }: Props) {
       aria-labelledby={titleId}
       data-testid="image-compare-preview"
       data-preview-key={key}
+      data-preview-job={target.jobId}
     >
       <div className="preview-scrim" onClick={onClose} aria-hidden="true" />
       <div className="hud-frame preview-panel">
@@ -181,6 +198,7 @@ export function ImageComparePreview({ target, onClose }: Props) {
           <Pane
             label="Original"
             path={target.sourcePath}
+            displayPath={displaySource}
             bytes={target.originalBytes}
             dims={originalDims}
             onDims={setOriginalDims}
@@ -189,6 +207,7 @@ export function ImageComparePreview({ target, onClose }: Props) {
           <Pane
             label="Compressed"
             path={target.outputPath}
+            displayPath={displayOutput}
             bytes={target.resultBytes}
             dims={outputDims}
             onDims={setOutputDims}
