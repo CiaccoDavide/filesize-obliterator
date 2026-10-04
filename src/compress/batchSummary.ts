@@ -111,7 +111,7 @@ export function buildBatchSummary(rows: ProgressRow[]): BatchSummary | null {
 
 export function failedRowsForRetry(rows: ProgressRow[]): RetryCandidate[] {
   return rows
-    .filter((r) => r.phase === "FAILED" && r.presetId)
+    .filter((r) => r.phase === "FAILED" && r.presetId && !r.cleanupPending)
     .map((r) => ({
       sourcePath: r.sourcePath,
       mediaKind: r.mediaKind,
@@ -166,7 +166,8 @@ export const ENCODER_SPARSE_STALL_MS = 10 * 60_000;
 
 /**
  * UI escape hatch after cancel: Rust force-fails within ~8s cancel grace.
- * If the Failed event is dropped, force-fail ABORTING so RETRY is not gated forever.
+ * If the Failed event is dropped, force-fail ABORTING to surface FAILED on the
+ * ops line — RETRY stays gated via cleanupPending until a real Failed arrives.
  */
 export const CANCEL_CLEANUP_TIMEOUT_MS = 15_000;
 

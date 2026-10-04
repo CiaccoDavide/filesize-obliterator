@@ -6,6 +6,7 @@ export function createBatchAdmissionController() {
   let generation = 0;
   return {
     begin(): number {
+      generation += 1;
       return generation;
     },
     abort(): void {

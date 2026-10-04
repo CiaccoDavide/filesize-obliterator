@@ -156,6 +156,33 @@ describe("buildBatchSummary", () => {
       failures: [],
     });
   });
+
+  it("scopes summary to the latest advanced admission generation", () => {
+    // begin() now advances from 0 → 1 → 2, so untagged/gen-0 rows must not pollute.
+    expect(
+      buildBatchSummary([
+        row({
+          jobId: "untagged-fail",
+          phase: "FAILED",
+          sourcePath: "/tmp/old.png",
+          error: "encoder crashed",
+        }),
+        row({
+          jobId: "gen2-ok",
+          phase: "COMPLETE",
+          sourcePath: "/tmp/new.png",
+          outputPath: "/tmp/_compressed/new.webp",
+          batchGeneration: 2,
+        }),
+      ]),
+    ).toMatchObject({
+      status: "COMPLETE",
+      succeeded: 1,
+      failed: 0,
+      failures: [],
+    });
+  });
+
 });
 
 describe("failedRowsForRetry / dismissFailedRows", () => {
@@ -176,6 +203,36 @@ describe("failedRowsForRetry / dismissFailedRows", () => {
         sourcePath: "/tmp/b.png",
         mediaKind: "video",
         presetId: "video-balanced",
+      },
+    ]);
+  });
+
+
+  it("excludes cleanupPending FAILED rows until a real Failed clears the flag", () => {
+    const rows = [
+      row({
+        jobId: "pending",
+        phase: "FAILED",
+        sourcePath: "/tmp/pending.png",
+        mediaKind: "video",
+        presetId: "video-balanced",
+        error: "cancelled",
+        cleanupPending: true,
+      }),
+      row({
+        jobId: "ready",
+        phase: "FAILED",
+        sourcePath: "/tmp/ready.png",
+        mediaKind: "image",
+        presetId: "stub",
+        error: "encoder crashed",
+      }),
+    ];
+    expect(failedRowsForRetry(rows)).toEqual([
+      {
+        sourcePath: "/tmp/ready.png",
+        mediaKind: "image",
+        presetId: "stub",
       },
     ]);
   });

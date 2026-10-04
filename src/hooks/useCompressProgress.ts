@@ -83,6 +83,8 @@ export function useCompressProgress() {
   const stallLabeledIdsRef = useRef<Set<string>>(new Set());
   /** When each job entered ABORTING — force-fail if Failed never arrives. */
   const abortStartedRef = useRef<Map<string, number>>(new Map());
+  /** Tombstones for DISMISS/RETRY/admit-dropped FAILED ids — ignore late events. */
+  const dismissedJobIdsRef = useRef<Set<string>>(new Set());
   const lastOptionsRef = useRef<StartStagedOptions>({});
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
@@ -102,6 +104,14 @@ export function useCompressProgress() {
 
   const clearAbortStarted = useCallback((jobId: string) => {
     abortStartedRef.current.delete(jobId);
+  }, []);
+
+  const tombstoneFailedIds = useCallback((rows: ProgressRow[]) => {
+    for (const row of rows) {
+      if (row.phase === "FAILED") {
+        dismissedJobIdsRef.current.add(row.jobId);
+      }
+    }
   }, []);
 
   useEffect(() => {
@@ -124,7 +134,11 @@ export function useCompressProgress() {
                 ev = { ...ev, error: ENCODER_STALL_ERROR };
               }
             }
-            const next = applyCompressEvent(prev, ev);
+            const next = applyCompressEvent(
+              prev,
+              ev,
+              dismissedJobIdsRef.current,
+            );
             const row = next.find((r) => r.jobId === ev.jobId);
             if (
               row &&
@@ -151,7 +165,8 @@ export function useCompressProgress() {
 
   // Stall watchdog — cancel silent encodes so reserved paths/.partial clean up.
   // Keep ABORTING until Failed (after StagingCleanup) so RETRY stays off; if Failed
-  // never arrives, force-fail after cancel cleanup timeout.
+  // never arrives, force-fail after cancel cleanup timeout with cleanupPending so
+  // RETRY stays gated until a real Failed event.
   useEffect(() => {
     const timer = window.setInterval(() => {
       const now = Date.now();
@@ -172,7 +187,7 @@ export function useCompressProgress() {
               : "cancelled";
             stallLabeledIdsRef.current.delete(id);
             clearAbortStarted(id);
-            next = markFailed(next, id, err);
+            next = markFailed(next, id, err, { cleanupPending: true });
           }
           return next;
         });
@@ -269,11 +284,12 @@ export function useCompressProgress() {
       setError(null);
       // Drop prior FAILED and tag kept successes with this batch generation so
       // buildBatchSummary cannot mix stale failures into a later COMPRESS.
-      setRows((prev) =>
-        prev
+      setRows((prev) => {
+        tombstoneFailedIds(prev);
+        return prev
           .filter((r) => r.phase !== "FAILED")
-          .map((r) => ({ ...r, batchGeneration: token })),
-      );
+          .map((r) => ({ ...r, batchGeneration: token }));
+      });
       try {
         await runSequentialAdmit(targets, {
           isCurrent: () => admissionRef.current.isCurrent(token),
@@ -324,7 +340,7 @@ export function useCompressProgress() {
         setStarting(false);
       }
     },
-    [touchActivity],
+    [touchActivity, tombstoneFailedIds],
   );
 
   const startStaged = useCallback(
@@ -358,14 +374,20 @@ export function useCompressProgress() {
       return;
     }
     // Drop failed rows first so successes stay and new job ids replace failures.
-    setRows((prev) => dismissFailedRows(prev));
+    setRows((prev) => {
+      tombstoneFailedIds(prev);
+      return dismissFailedRows(prev);
+    });
     await admitTargets(targets, lastOptionsRef.current);
-  }, [admitTargets]);
+  }, [admitTargets, tombstoneFailedIds]);
 
   const dismissFailed = useCallback(() => {
-    setRows((prev) => dismissFailedRows(prev));
+    setRows((prev) => {
+      tombstoneFailedIds(prev);
+      return dismissFailedRows(prev);
+    });
     setError(null);
-  }, []);
+  }, [tombstoneFailedIds]);
 
   const abortAll = useCallback(async () => {
     // Invalidate any in-flight startStaged so it stops admitting further files.

@@ -28,6 +28,12 @@ export type ProgressRow = {
   error?: string;
   /** Admission generation for this row's batch; scopes batch summary. */
   batchGeneration?: number;
+  /**
+   * Set when the UI force-fails ABORTING after CANCEL_CLEANUP_TIMEOUT_MS while
+   * Rust may still be inside finish_after_staging_cleanup. RETRY stays gated
+   * until a real Failed event clears this flag.
+   */
+  cleanupPending?: boolean;
 };
 
 const PHASE_RANK: Record<OpsPhase, number> = {
@@ -164,26 +170,19 @@ export function markFailed(
   rows: ProgressRow[],
   jobId: string,
   error: string,
+  options?: { cleanupPending?: boolean },
 ): ProgressRow[] {
   const terse = normalizeOpsError(error);
   const idx = rows.findIndex((r) => r.jobId === jobId);
-  if (idx === -1) {
-    return [
-      ...rows,
-      {
-        ...placeholderRow(jobId),
-        phase: "FAILED",
-        error: terse,
-        outputPath: undefined,
-      },
-    ];
-  }
+  // Unknown ids stay unknown — never invent a placeholder FAILED row.
+  if (idx === -1) return rows;
   const copy = rows.slice();
   copy[idx] = {
     ...rows[idx],
     phase: "FAILED",
     error: terse,
     outputPath: undefined,
+    ...(options?.cleanupPending ? { cleanupPending: true } : {}),
   };
   return copy;
 }
@@ -265,7 +264,11 @@ export function abortSurfaceErrorFromCancelResults(
 export function applyCompressEvent(
   rows: ProgressRow[],
   event: CompressEvent,
+  ignoredJobIds?: ReadonlySet<string>,
 ): ProgressRow[] {
+  // DISMISS/RETRY/admit tombstones — never rehydrate dropped FAILED rows.
+  if (ignoredJobIds?.has(event.jobId)) return rows;
+
   let working = rows;
   let idx = working.findIndex((r) => r.jobId === event.jobId);
   if (idx === -1) {
@@ -325,6 +328,7 @@ export function applyCompressEvent(
         bytesProcessed: event.resultBytes,
         bytesTotal: event.originalBytes,
         error: undefined,
+        cleanupPending: undefined,
       };
       return copy;
     case "failed": {
@@ -338,6 +342,8 @@ export function applyCompressEvent(
         error,
         // Incomplete / reserved outputs are never success paths.
         outputPath: undefined,
+        // Real Failed after staging cleanup — RETRY may proceed.
+        cleanupPending: undefined,
       };
       return copy;
     }

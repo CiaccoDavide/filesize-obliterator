@@ -11,6 +11,7 @@ import {
   formatByteMeter,
   jobStatusToPhase,
   markAborting,
+  markFailed,
   sizeDeltaLabel,
   upsertJob,
   type ProgressRow,
@@ -708,5 +709,94 @@ describe("formatByteMeter / sizeDeltaLabel", () => {
     expect(sizeDeltaLabel(1000, 120, fmt)).toBe("−880 B");
     expect(sizeDeltaLabel(100, 120, fmt)).toBe("+20 B");
     expect(sizeDeltaLabel(100, undefined, fmt)).toBeNull();
+  });
+});
+
+describe("dismissed / tombstoned job ids", () => {
+  it("does not resurrect a dismissed jobId from a late Failed event", () => {
+    const ignored = new Set(["gone-1"]);
+    const before = [row({ jobId: "ok", phase: "COMPLETE", sourcePath: "/tmp/ok.png" })];
+    const rows = applyCompressEvent(
+      before,
+      { type: "failed", jobId: "gone-1", error: "cancelled" },
+      ignored,
+    );
+    expect(rows).toEqual(before);
+  });
+
+  it("does not resurrect a dismissed jobId from late progress", () => {
+    const ignored = new Set(["gone-1"]);
+    const before: ProgressRow[] = [];
+    const rows = applyCompressEvent(
+      before,
+      {
+        type: "progress",
+        jobId: "gone-1",
+        percent: 40,
+        bytesProcessed: 400,
+        bytesTotal: 1000,
+      },
+      ignored,
+    );
+    expect(rows).toEqual(before);
+  });
+
+  it("still upserts early progress placeholders for non-tombstoned ids", () => {
+    const rows = applyCompressEvent([], {
+      type: "progress",
+      jobId: "early-2",
+      percent: 10,
+      bytesProcessed: 100,
+      bytesTotal: 1000,
+    }, new Set(["other"]));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      jobId: "early-2",
+      phase: "COMPRESSING",
+      percent: 10,
+      sourcePath: "—",
+    });
+  });
+});
+
+describe("markFailed", () => {
+  it("does not create a placeholder for an unknown jobId", () => {
+    const before = [row({ phase: "COMPLETE" })];
+    expect(markFailed(before, "missing", "cancelled")).toEqual(before);
+  });
+
+  it("marks an existing row FAILED and can set cleanupPending", () => {
+    const rows = markFailed(
+      [row({ phase: "ABORTING", percent: 40 })],
+      "job-1",
+      "cancelled",
+      { cleanupPending: true },
+    );
+    expect(rows[0]).toMatchObject({
+      phase: "FAILED",
+      error: "cancelled",
+      cleanupPending: true,
+      outputPath: undefined,
+    });
+  });
+});
+
+describe("cleanupPending", () => {
+  it("clears cleanupPending when a real Failed event arrives", () => {
+    const rows = applyCompressEvent(
+      [
+        row({
+          phase: "FAILED",
+          error: "cancelled",
+          cleanupPending: true,
+        }),
+      ],
+      { type: "failed", jobId: "job-1", error: "cancelled" },
+    );
+    expect(rows[0]).toMatchObject({
+      phase: "FAILED",
+      error: "cancelled",
+      cleanupPending: undefined,
+    });
   });
 });
