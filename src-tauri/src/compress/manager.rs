@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
 
+use super::output::prepare_output_path;
 use super::state::{apply_transition, should_continue, Transition, TransitionError};
 use super::types::{
     CompressEvent, CompressStartRequest, JobInfo, JobStatus, COMPRESS_EVENT,
@@ -250,17 +251,6 @@ fn emit(app: &AppHandle, event: CompressEvent) {
     let _ = app.emit(COMPRESS_EVENT, event);
 }
 
-fn stub_output_path(job_id: &str, source: &Path) -> PathBuf {
-    let stem = source
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output");
-    std::env::temp_dir()
-        .join("filesize-obliterator")
-        .join(job_id)
-        .join(format!("{stem}.stub"))
-}
-
 fn run_stub_job(
     manager: JobManager,
     app: AppHandle,
@@ -298,11 +288,10 @@ fn run_stub_job(
     );
 
     let source = PathBuf::from(&source_path);
-    let output_path = stub_output_path(&job_id, &source);
-
-    if let Some(parent) = output_path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
-            let error = format!("cannot create output dir: {e}");
+    // Stub codec extension; real encoders pass their output ext / preset slug.
+    let output_path = match prepare_output_path(&source, "stub") {
+        Ok(path) => path,
+        Err(error) => {
             let _ = manager.mark_failed(&job_id, error.clone());
             emit(
                 &app,
@@ -313,16 +302,29 @@ fn run_stub_job(
             );
             return;
         }
-    }
+    };
 
-    // Partial staging file — never promoted on cancel.
-    let partial_path = output_path.with_extension("stub.partial");
+    // Partial staging file — unique per job so concurrent encodes never share a staging name.
+    // Never promoted on cancel. Final path is already reserved (empty) by prepare_output_path.
+    let partial_path = {
+        let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
+        let base = output_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("out");
+        parent.join(format!("{base}.{job_id}.partial"))
+    };
     let _ = fs::write(&partial_path, b"");
+
+    let release_reserved = || {
+        let _ = fs::remove_file(&partial_path);
+        let _ = fs::remove_file(&output_path);
+    };
 
     let steps = [0.0_f64, 20.0, 40.0, 60.0, 80.0, 100.0];
     for percent in steps {
         if cancel.load(Ordering::SeqCst) || manager.is_cancel_requested(&job_id) {
-            let _ = fs::remove_file(&partial_path);
+            release_reserved();
             let error = "cancelled".to_string();
             let _ = manager.mark_failed(&job_id, error.clone());
             // Ensure list status is Cancelled even if cancel raced after start.
@@ -345,7 +347,7 @@ fn run_stub_job(
             .mark_progress(&job_id, percent)
             .unwrap_or(false)
         {
-            let _ = fs::remove_file(&partial_path);
+            release_reserved();
             return;
         }
 
@@ -365,7 +367,7 @@ fn run_stub_job(
     }
 
     if cancel.load(Ordering::SeqCst) || manager.is_cancel_requested(&job_id) {
-        let _ = fs::remove_file(&partial_path);
+        release_reserved();
         let error = "cancelled".to_string();
         let _ = manager.mark_failed(&job_id, error.clone());
         let _ = manager.with_job(&job_id, |record| {
@@ -386,7 +388,7 @@ fn run_stub_job(
     // Tiny stub "compressed" payload — real encoders land in later tasks.
     let stub_bytes = b"fo-stub\n";
     if let Err(e) = fs::write(&partial_path, stub_bytes) {
-        let _ = fs::remove_file(&partial_path);
+        release_reserved();
         let error = format!("write failed: {e}");
         let _ = manager.mark_failed(&job_id, error.clone());
         emit(
@@ -399,8 +401,10 @@ fn run_stub_job(
         return;
     }
 
-    if let Err(e) = fs::rename(&partial_path, &output_path) {
-        let _ = fs::remove_file(&partial_path);
+    // Promote into the reserved final path (overwrite placeholder). Avoid rename-over-existing
+    // so Windows and Unix behave the same while the reservation stays exclusive.
+    if let Err(e) = fs::write(&output_path, stub_bytes) {
+        release_reserved();
         let error = format!("finalize failed: {e}");
         let _ = manager.mark_failed(&job_id, error.clone());
         emit(
@@ -412,6 +416,7 @@ fn run_stub_job(
         );
         return;
     }
+    let _ = fs::remove_file(&partial_path);
 
     let result_bytes = stub_bytes.len() as u64;
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -487,16 +492,6 @@ mod tests {
         let mut f = fs::File::create(&path).expect("create");
         f.write_all(contents).expect("write");
         path
-    }
-
-    #[test]
-    fn stub_output_path_nests_under_temp_job_dir() {
-        let source = Path::new("/tmp/photos/Holiday.JPG");
-        let out = stub_output_path("job-9", source);
-        let s = out.to_string_lossy();
-        assert!(s.contains("filesize-obliterator"));
-        assert!(s.contains("job-9"));
-        assert!(s.ends_with("Holiday.stub"));
     }
 
     #[test]
