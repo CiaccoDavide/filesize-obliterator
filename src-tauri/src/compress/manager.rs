@@ -11,7 +11,8 @@ use tauri::{AppHandle, Emitter};
 use super::audio_encode::encode_audio;
 use super::image_encode::encode_image;
 use super::output::prepare_output_path;
-use super::presets::{audio_preset, image_preset};
+use super::presets::{audio_preset, image_preset, video_preset};
+use super::video_encode::encode_video;
 use super::state::{apply_transition, should_continue, Transition, TransitionError};
 use super::types::{
     CompressEvent, CompressStartRequest, JobInfo, JobStatus, MediaKind, COMPRESS_EVENT,
@@ -292,8 +293,11 @@ fn resolve_output_ext(media_kind: &MediaKind, preset_id: &str) -> Result<&'stati
         MediaKind::Audio => audio_preset(preset_id)
             .map(|p| p.output_ext())
             .ok_or_else(|| format!("unknown audio preset: {preset_id}")),
-        // Video/pdf encoders arrive in later tasks — stub extension for now.
-        _ => Ok("stub"),
+        MediaKind::Video => video_preset(preset_id)
+            .map(|p| p.output_ext())
+            .ok_or_else(|| format!("unknown video preset: {preset_id}")),
+        // Pdf encoder arrives in a later task — stub extension for now.
+        MediaKind::Pdf => Ok("stub"),
     }
 }
 
@@ -331,7 +335,8 @@ fn run_job(
     let encoder_label = match media_kind {
         MediaKind::Image => "image",
         MediaKind::Audio => "audio",
-        _ => "stub",
+        MediaKind::Video => "video",
+        MediaKind::Pdf => "stub",
     };
     emit(
         &app,
@@ -422,7 +427,32 @@ fn run_job(
             }
             result
         }
-        _ => run_stub_encode(&manager, &job_id, &cancel, &partial_path, report_progress),
+        MediaKind::Video => {
+            if !report_progress(1.0) {
+                release_reserved();
+                cancel_job(&manager, &app, job_id);
+                return;
+            }
+            let mut on_progress = |percent: f64| -> bool {
+                // Map encoder 0..=99 into job 1..=95 so finalize can still emit 100.
+                let mapped = (percent.clamp(0.0, 99.0) * 0.95).clamp(1.0, 95.0);
+                report_progress(mapped)
+            };
+            let result = encode_video(
+                &source,
+                &preset_id,
+                &partial_path,
+                Some(cancel.as_ref()),
+                Some(&mut on_progress),
+            );
+            if result.is_ok() && !report_progress(96.0) {
+                release_reserved();
+                cancel_job(&manager, &app, job_id);
+                return;
+            }
+            result
+        }
+        MediaKind::Pdf => run_stub_encode(&manager, &job_id, &cancel, &partial_path, report_progress),
     };
 
     if let Err(error) = encode_result {
@@ -441,8 +471,10 @@ fn run_job(
         return;
     }
 
-    let payload = match fs::read(&partial_path) {
-        Ok(bytes) => bytes,
+    // Promote partial into the reserved final path without loading the whole file into RAM
+    // (video outputs can be large). Remove the empty reservation first so rename works on Windows.
+    let result_bytes = match fs::metadata(&partial_path).map(|m| m.len()) {
+        Ok(n) => n,
         Err(e) => {
             release_reserved();
             fail_job(
@@ -454,28 +486,27 @@ fn run_job(
             return;
         }
     };
-
-    // Promote into the reserved final path (overwrite placeholder). Avoid rename-over-existing
-    // so Windows and Unix behave the same while the reservation stays exclusive.
-    if let Err(e) = fs::write(&output_path, &payload) {
-        release_reserved();
-        fail_job(
-            &manager,
-            &app,
-            job_id,
-            format!("finalize failed: {e}"),
-        );
-        return;
+    let _ = fs::remove_file(&output_path);
+    if let Err(e) = fs::rename(&partial_path, &output_path) {
+        // Fallback copy if rename crosses volumes.
+        if let Err(copy_err) = fs::copy(&partial_path, &output_path) {
+            release_reserved();
+            fail_job(
+                &manager,
+                &app,
+                job_id,
+                format!("finalize failed: {e}; copy: {copy_err}"),
+            );
+            return;
+        }
+        let _ = fs::remove_file(&partial_path);
     }
-    let _ = fs::remove_file(&partial_path);
 
     if !report_progress(100.0) {
         let _ = fs::remove_file(&output_path);
         cancel_job(&manager, &app, job_id);
         return;
     }
-
-    let result_bytes = payload.len() as u64;
     let duration_ms = started.elapsed().as_millis() as u64;
     let output_str = output_path.to_string_lossy().into_owned();
 
@@ -516,7 +547,7 @@ fn run_job(
     }
 }
 
-/// Placeholder encoder for kinds without a real pipeline yet (video/pdf).
+/// Placeholder encoder for kinds without a real pipeline yet (pdf).
 fn run_stub_encode(
     manager: &JobManager,
     job_id: &str,
