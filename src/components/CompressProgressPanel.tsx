@@ -1,3 +1,7 @@
+import {
+  batchCompletionAnnouncement,
+  opsPhaseStatusText,
+} from "../a11y/announce";
 import { formatBytes } from "../intake/formatBytes";
 import type { BatchSummary } from "../compress/batchSummary";
 import {
@@ -70,10 +74,6 @@ function rowDetail(row: ProgressRow): string {
   return row.statusMessage ? `${row.statusMessage} · ${meter}` : meter;
 }
 
-function summaryLine(summary: BatchSummary): string {
-  return `OK ${summary.succeeded} · FAIL ${summary.failed}`;
-}
-
 export function CompressProgressPanel({
   rows,
   phase,
@@ -99,16 +99,20 @@ export function CompressProgressPanel({
   return (
     <section className="hud-frame compress-panel" aria-label="Compress progress">
       <div className="compress-top">
-        <div className="compress-status-wrap">
+        <div
+          className="compress-status-wrap"
+          aria-live="polite"
+          aria-atomic="true"
+        >
           <p className={`compress-status tone-${tone}`}>
             {(phase === "COMPRESSING" || phase === "ABORTING") && (
               <span className="hud-tick" aria-hidden="true" />
             )}
-            {phase}
+            {opsPhaseStatusText(phase)}
           </p>
           {batchSummary ? (
             <p className="compress-batch-summary mono" role="status">
-              {summaryLine(batchSummary)}
+              {batchCompletionAnnouncement(batchSummary)}
             </p>
           ) : null}
           {error ? (
@@ -208,7 +212,9 @@ export function CompressProgressPanel({
         <ul className="compress-list">
           {rows.map((row) => (
             <li key={row.jobId} className="compress-row">
-              <span className="compress-row-phase">{row.phase}</span>
+              <span className="compress-row-phase">
+                {opsPhaseStatusText(row.phase)}
+              </span>
               <div className="compress-row-main">
                 <span className="compress-path mono" title={row.sourcePath}>
                   {row.sourcePath}

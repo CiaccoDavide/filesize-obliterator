@@ -255,30 +255,9 @@ function App() {
 
   const showOps = shellShowsOps(shellMode);
   const showProgress = shellShowsProgress(shellMode);
-  const progressFirst = showProgress;
 
   const startDisabled =
     compress.starting || staged.length === 0 || compress.canAbort;
-
-  const progressPanel = showProgress ? (
-    <CompressProgressPanel
-      rows={compress.rows}
-      phase={compress.phase}
-      batchSummary={compress.batchSummary}
-      error={compress.error}
-      canAbort={compress.canAbort}
-      aborting={compress.aborting}
-      canRetryFailed={compress.canRetryFailed}
-      canDismissFailed={compress.canDismissFailed}
-      onAbort={() => void compress.abortAll()}
-      onCancelOne={(jobId) => void compress.cancelOne(jobId)}
-      onClearFinished={compress.clearFinished}
-      onRetryFailed={() => void compress.retryFailed()}
-      onDismissFailed={compress.dismissFailed}
-      onPreviewImage={handlePreviewImage}
-      onReveal={(action, targets) => void handleReveal(action, targets)}
-    />
-  ) : null;
 
   const opsStrip = showOps ? (
     <div className="ops-strip hud-frame" data-testid="ops-strip">
@@ -334,6 +313,7 @@ function App() {
             estimate.estimating || startDisabled
           }
           onClick={() => void estimate.previewStaged(staged)}
+          aria-label="Preview dry-run estimate"
         >
           {estimate.estimating ? "ESTIMATING" : "PREVIEW"}
         </button>
@@ -348,6 +328,7 @@ function App() {
               force: forceReencode,
             })
           }
+          aria-label="Start compress"
         >
           {compress.starting ? "STARTING" : "COMPRESS"}
         </button>
@@ -404,8 +385,6 @@ function App() {
             </p>
           </header>
 
-          {progressFirst ? progressPanel : null}
-
           <FileDropZone
             ref={dropZoneRef}
             dragActive={dragActive}
@@ -416,7 +395,12 @@ function App() {
               <div className="staged-head">
                 <p className="panel-label">Staged</p>
                 {staged.length > 0 ? (
-                  <button type="button" className="btn" onClick={handleClearStaged}>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={handleClearStaged}
+                    aria-label="Clear staged files"
+                  >
                     Clear
                   </button>
                 ) : null}
@@ -430,7 +414,30 @@ function App() {
           </FileDropZone>
 
           {opsStrip}
-          {!progressFirst ? progressPanel : null}
+
+          {/*
+            DOM order keeps keyboard tab flow: drop → presets → start → queue.
+            CSS order lifts the queue visually above intake when running/done.
+          */}
+          {showProgress ? (
+            <CompressProgressPanel
+              rows={compress.rows}
+              phase={compress.phase}
+              batchSummary={compress.batchSummary}
+              error={compress.error}
+              canAbort={compress.canAbort}
+              aborting={compress.aborting}
+              canRetryFailed={compress.canRetryFailed}
+              canDismissFailed={compress.canDismissFailed}
+              onAbort={() => void compress.abortAll()}
+              onCancelOne={(jobId) => void compress.cancelOne(jobId)}
+              onClearFinished={compress.clearFinished}
+              onRetryFailed={() => void compress.retryFailed()}
+              onDismissFailed={compress.dismissFailed}
+              onPreviewImage={handlePreviewImage}
+              onReveal={(action, targets) => void handleReveal(action, targets)}
+            />
+          ) : null}
 
           <details ref={settingsRef} className="hud-frame secondary-panel">
             <summary className="secondary-summary">

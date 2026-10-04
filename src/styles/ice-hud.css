@@ -16,6 +16,9 @@
   --panel: rgba(255, 255, 255, 0.03);
   --font-hud: "Exo 2", "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+  /* Keyboard focus — ice accent, square (issue #36) */
+  --focus-ring: var(--accent);
+  --focus-offset: 2px;
 }
 
 *,
@@ -39,6 +42,17 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+/* Visible keyboard focus — ice outline, square corners */
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 1px solid var(--focus-ring);
+  outline-offset: var(--focus-offset);
+  border-radius: 0;
 }
 
 /* Full-bleed atmosphere */
@@ -154,15 +168,14 @@ textarea {
   border: 1px solid var(--line);
   color: var(--text);
   padding: 0.75rem 0.9rem;
-  outline: none;
   border-radius: 0;
   font-family: var(--font-mono);
   font-size: 0.85rem;
 }
 
-.field input:focus,
-.field textarea:focus,
-.field select:focus {
+.field input:focus-visible,
+.field textarea:focus-visible,
+.field select:focus-visible {
   border-color: var(--accent);
 }
 

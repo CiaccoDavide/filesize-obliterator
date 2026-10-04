@@ -42,8 +42,9 @@ export function PresetPicker({
                 <>
                   <div
                     className="preset-options"
-                    role="radiogroup"
+                    role="listbox"
                     aria-label={`${kind} preset`}
+                    aria-disabled={disabled || undefined}
                   >
                     {options.map((preset) => {
                       const isActive = preset.id === activeId;
@@ -51,8 +52,8 @@ export function PresetPicker({
                         <button
                           key={preset.id}
                           type="button"
-                          role="radio"
-                          aria-checked={isActive}
+                          role="option"
+                          aria-selected={isActive}
                           className={`preset-option${isActive ? " is-active" : ""}`}
                           disabled={disabled}
                           title={preset.description}
