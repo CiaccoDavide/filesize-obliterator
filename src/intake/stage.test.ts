@@ -25,9 +25,26 @@ describe("stageResolvedPaths", () => {
       kind: "image",
       bytes: 2048,
       status: "staged",
+      presetId: "",
     });
     expect(staged[1].kind).toBe("audio");
     expect(status).toContain("STAGED 2");
+  });
+
+  it("assigns presetId from per-kind defaults when staging", () => {
+    const { staged } = stageResolvedPaths(
+      [],
+      [probe("/tmp/a.png"), probe("/tmp/b.pdf")],
+      {},
+      {
+        presetByKind: {
+          image: "image-balanced",
+          pdf: "pdf-ebook",
+        },
+      },
+    );
+    expect(staged[0].presetId).toBe("image-balanced");
+    expect(staged[1].presetId).toBe("pdf-ebook");
   });
 
   it("does not stage unsupported files and reports terse reject status", () => {
@@ -45,6 +62,7 @@ describe("stageResolvedPaths", () => {
         kind: "image",
         bytes: 10,
         status: "staged",
+        presetId: "image-balanced",
       },
     ];
     const { staged, status } = stageResolvedPaths(existing, [
