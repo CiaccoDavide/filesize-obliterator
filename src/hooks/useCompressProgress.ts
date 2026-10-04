@@ -107,6 +107,28 @@ export function useCompressProgress() {
     if (surfaceError) setError(surfaceError);
   }, [rows]);
 
+  const cancelOne = useCallback(async (jobId: string) => {
+    const row = rows.find((r) => r.jobId === jobId);
+    if (
+      !row ||
+      row.phase === "COMPLETE" ||
+      row.phase === "FAILED" ||
+      row.phase === "ABORTING"
+    ) {
+      return;
+    }
+    setRows((prev) => markAborting(prev, [jobId]));
+    setError(null);
+    const results = await Promise.allSettled([compressCancel(jobId)]);
+    let surfaceError: string | null = null;
+    setRows((prev) => {
+      surfaceError = abortSurfaceErrorFromCancelResults(prev, [jobId], results);
+      return applyCancelResults(prev, [jobId], results);
+    });
+    if (surfaceError) setError(surfaceError);
+  }, [rows]);
+
+  /** Clears finished HUD rows only — never deletes on-disk `_compressed` outputs. */
   const clearFinished = useCallback(() => {
     setRows((prev) =>
       prev.filter(
@@ -124,6 +146,7 @@ export function useCompressProgress() {
     aborting,
     startStaged,
     abortAll,
+    cancelOne,
     clearFinished,
   };
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,14 +19,27 @@ use super::types::{
 };
 use super::video_encode::encode_video;
 
+/// Hard cap on parallel encode workers (video/ffmpeg-heavy workloads).
+pub const MAX_CONCURRENT_JOBS: usize = 2;
+
 struct JobRecord {
     info: JobInfo,
     cancel: Arc<AtomicBool>,
 }
 
+struct QueuedWork {
+    job_id: String,
+    cancel: Arc<AtomicBool>,
+    run: Box<dyn FnOnce() + Send + 'static>,
+}
+
 struct Inner {
     next_id: u64,
     jobs: HashMap<String, JobRecord>,
+    /// FIFO of admitted jobs waiting for a worker slot (not yet spawned).
+    wait_queue: VecDeque<QueuedWork>,
+    /// Number of worker threads currently executing encode work.
+    active_workers: usize,
 }
 
 #[derive(Clone, Default)]
@@ -39,7 +52,27 @@ impl Default for Inner {
         Self {
             next_id: 1,
             jobs: HashMap::new(),
+            wait_queue: VecDeque::new(),
+            active_workers: 0,
         }
+    }
+}
+
+/// Releases a concurrency slot and pumps the wait queue when dropped.
+struct WorkerSlot {
+    manager: JobManager,
+}
+
+impl Drop for WorkerSlot {
+    fn drop(&mut self) {
+        {
+            let mut guard = match self.manager.inner.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            guard.active_workers = guard.active_workers.saturating_sub(1);
+        }
+        self.manager.pump();
     }
 }
 
@@ -58,7 +91,38 @@ impl JobManager {
             .map_err(|e| format!("cannot read source: {e}"))?
             .len();
 
-        let (job_id, info, cancel) = {
+        let manager = self.clone();
+        let source_path = request.source_path.clone();
+        let preset_id = request.preset_id.clone();
+        let media_kind = request.media_kind.clone();
+        let strip_metadata = request.strip_metadata;
+
+        self.admit(request, original_bytes, move |job_id, cancel| {
+            run_job(
+                manager,
+                app,
+                job_id,
+                source_path,
+                media_kind,
+                preset_id,
+                strip_metadata,
+                original_bytes,
+                cancel,
+            );
+        })
+    }
+
+    /// Admit a job into the ordered queue and pump workers up to [`MAX_CONCURRENT_JOBS`].
+    fn admit<F>(
+        &self,
+        request: CompressStartRequest,
+        original_bytes: u64,
+        work: F,
+    ) -> Result<JobInfo, String>
+    where
+        F: FnOnce(String, Arc<AtomicBool>) + Send + 'static,
+    {
+        let info = {
             let mut guard = self
                 .inner
                 .lock()
@@ -87,29 +151,63 @@ impl JobManager {
                     cancel: Arc::clone(&cancel),
                 },
             );
-            (id, info, cancel)
+
+            let job_id = id.clone();
+            let cancel_for_work = Arc::clone(&cancel);
+            guard.wait_queue.push_back(QueuedWork {
+                job_id: id,
+                cancel,
+                run: Box::new(move || work(job_id, cancel_for_work)),
+            });
+            info
         };
 
-        let manager = self.clone();
-        let source_path = request.source_path;
-        let preset_id = request.preset_id;
-        let media_kind = request.media_kind;
-        let strip_metadata = request.strip_metadata;
-        thread::spawn(move || {
-            run_job(
-                manager,
-                app,
-                job_id,
-                source_path,
-                media_kind,
-                preset_id,
-                strip_metadata,
-                original_bytes,
-                cancel,
-            );
-        });
-
+        self.pump();
         Ok(info)
+    }
+
+    /// Spawn workers for queued jobs until the concurrency cap is reached.
+    fn pump(&self) {
+        loop {
+            let work = {
+                let mut guard = match self.inner.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                if guard.active_workers >= MAX_CONCURRENT_JOBS {
+                    return;
+                }
+                let mut chosen: Option<QueuedWork> = None;
+                while let Some(item) = guard.wait_queue.pop_front() {
+                    if item.cancel.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    let cancelled = guard
+                        .jobs
+                        .get(&item.job_id)
+                        .map(|r| r.info.status == JobStatus::Cancelled)
+                        .unwrap_or(true);
+                    if cancelled {
+                        continue;
+                    }
+                    guard.active_workers += 1;
+                    chosen = Some(item);
+                    break;
+                }
+                match chosen {
+                    Some(w) => w,
+                    None => return,
+                }
+            };
+
+            let manager = self.clone();
+            thread::spawn(move || {
+                let _slot = WorkerSlot {
+                    manager: manager.clone(),
+                };
+                (work.run)();
+            });
+        }
     }
 
     pub fn cancel(&self, job_id: &str) -> Result<JobInfo, String> {
@@ -117,6 +215,10 @@ impl JobManager {
             .inner
             .lock()
             .map_err(|_| "job manager lock poisoned".to_string())?;
+
+        // Drop wait-queue entry so a cancelled job never takes a worker slot.
+        guard.wait_queue.retain(|w| w.job_id != job_id);
+
         let record = guard
             .jobs
             .get_mut(job_id)
@@ -253,6 +355,41 @@ impl JobManager {
             .ok()
             .and_then(|g| g.jobs.get(job_id).map(|r| r.cancel.load(Ordering::SeqCst)))
             .unwrap_or(true)
+    }
+
+    #[cfg(test)]
+    fn active_workers_for_test(&self) -> usize {
+        self.inner.lock().map(|g| g.active_workers).unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn wait_queue_len_for_test(&self) -> usize {
+        self.inner.lock().map(|g| g.wait_queue.len()).unwrap_or(0)
+    }
+
+    /// Test seam: admit work through the same bounded queue as production `start`.
+    #[cfg(test)]
+    fn start_with_work<F>(
+        &self,
+        source_path: PathBuf,
+        work: F,
+    ) -> Result<JobInfo, String>
+    where
+        F: FnOnce(Arc<AtomicBool>) + Send + 'static,
+    {
+        if !source_path.is_file() {
+            return Err("source file not found".into());
+        }
+        let original_bytes = fs::metadata(&source_path)
+            .map_err(|e| format!("cannot read source: {e}"))?
+            .len();
+        let request = CompressStartRequest {
+            source_path: source_path.to_string_lossy().into_owned(),
+            media_kind: MediaKind::Image,
+            preset_id: "balanced".into(),
+            strip_metadata: true,
+        };
+        self.admit(request, original_bytes, move |_job_id, cancel| work(cancel))
     }
 }
 
@@ -678,5 +815,149 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, "job-1");
         assert_eq!(list[1].id, "job-2");
+    }
+
+    #[test]
+    fn concurrency_cap_is_two() {
+        assert_eq!(MAX_CONCURRENT_JOBS, 2);
+    }
+
+    #[test]
+    fn never_runs_more_than_max_concurrent_jobs() {
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Duration;
+
+        let manager = JobManager::default();
+        let block = Arc::new(AtomicBool::new(true));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        for i in 0..5 {
+            let block = Arc::clone(&block);
+            let in_flight = Arc::clone(&in_flight);
+            let peak = Arc::clone(&peak);
+            let source = temp_source(&format!("conc-{i}.bin"), b"x");
+            manager
+                .start_with_work(source, move |_| {
+                    let n = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(n, Ordering::SeqCst);
+                    while block.load(Ordering::SeqCst) {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                })
+                .expect("admit");
+        }
+
+        // Wait until the cap is saturated.
+        let mut saw_cap = false;
+        for _ in 0..100 {
+            if in_flight.load(Ordering::SeqCst) == MAX_CONCURRENT_JOBS {
+                saw_cap = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(saw_cap, "expected {MAX_CONCURRENT_JOBS} workers in flight");
+        assert_eq!(manager.active_workers_for_test(), MAX_CONCURRENT_JOBS);
+        assert!(manager.wait_queue_len_for_test() >= 1);
+        assert_eq!(peak.load(Ordering::SeqCst), MAX_CONCURRENT_JOBS);
+
+        block.store(false, Ordering::SeqCst);
+        for _ in 0..100 {
+            if in_flight.load(Ordering::SeqCst) == 0
+                && manager.active_workers_for_test() == 0
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(peak.load(Ordering::SeqCst), MAX_CONCURRENT_JOBS);
+        assert_eq!(manager.active_workers_for_test(), 0);
+        assert_eq!(manager.wait_queue_len_for_test(), 0);
+    }
+
+    #[test]
+    fn cancel_waiting_job_never_runs_work() {
+        use std::time::Duration;
+
+        let manager = JobManager::default();
+        let block = Arc::new(AtomicBool::new(true));
+        let ran_waiting = Arc::new(AtomicBool::new(false));
+
+        for i in 0..MAX_CONCURRENT_JOBS {
+            let block = Arc::clone(&block);
+            let source = temp_source(&format!("block-{i}.bin"), b"x");
+            manager
+                .start_with_work(source, move |_| {
+                    while block.load(Ordering::SeqCst) {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                })
+                .expect("admit blocker");
+        }
+
+        // Wait for blockers to take both slots.
+        for _ in 0..100 {
+            if manager.active_workers_for_test() == MAX_CONCURRENT_JOBS {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(manager.active_workers_for_test(), MAX_CONCURRENT_JOBS);
+
+        let ran_waiting_flag = Arc::clone(&ran_waiting);
+        let waiting = manager
+            .start_with_work(temp_source("waiting.bin", b"x"), move |_| {
+                ran_waiting_flag.store(true, Ordering::SeqCst);
+            })
+            .expect("admit waiting");
+        assert!(manager.wait_queue_len_for_test() >= 1);
+
+        let cancelled = manager.cancel(&waiting.id).expect("cancel waiting");
+        assert_eq!(cancelled.status, JobStatus::Cancelled);
+        assert_eq!(manager.wait_queue_len_for_test(), 0);
+
+        block.store(false, Ordering::SeqCst);
+        for _ in 0..100 {
+            if manager.active_workers_for_test() == 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!ran_waiting.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn one_job_failure_does_not_block_sibling() {
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Duration;
+
+        let manager = JobManager::default();
+        let finished = Arc::new(AtomicUsize::new(0));
+
+        let finished_a = Arc::clone(&finished);
+        manager
+            .start_with_work(temp_source("fail-a.bin", b"x"), move |_| {
+                finished_a.fetch_add(1, Ordering::SeqCst);
+                // Simulate encode failure — sibling must still run.
+            })
+            .expect("admit a");
+
+        let finished_b = Arc::clone(&finished);
+        manager
+            .start_with_work(temp_source("ok-b.bin", b"x"), move |_| {
+                finished_b.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("admit b");
+
+        for _ in 0..100 {
+            if finished.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(finished.load(Ordering::SeqCst), 2);
     }
 }

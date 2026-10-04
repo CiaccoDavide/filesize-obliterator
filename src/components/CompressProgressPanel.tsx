@@ -16,8 +16,16 @@ type Props = {
   stagedCount: number;
   onStart: () => void;
   onAbort: () => void;
+  onCancelOne: (jobId: string) => void;
   onClearFinished: () => void;
 };
+
+function rowCancellable(row: ProgressRow): boolean {
+  return (
+    row.phase === "AWAITING" ||
+    row.phase === "COMPRESSING"
+  );
+}
 
 function phaseTone(phase: OpsPhase): "ok" | "warn" | "danger" {
   if (phase === "FAILED") return "danger";
@@ -51,6 +59,7 @@ export function CompressProgressPanel({
   stagedCount,
   onStart,
   onAbort,
+  onCancelOne,
   onClearFinished,
 }: Props) {
   const tone = phaseTone(phase);
@@ -148,6 +157,16 @@ export function CompressProgressPanel({
               <span className="compress-pct mono">
                 {Math.round(row.percent)}%
               </span>
+              {rowCancellable(row) ? (
+                <button
+                  type="button"
+                  className="btn danger compress-row-cancel"
+                  onClick={() => onCancelOne(row.jobId)}
+                  aria-label={`Cancel ${row.sourcePath}`}
+                >
+                  CANCEL
+                </button>
+              ) : null}
             </li>
           ))}
         </ul>

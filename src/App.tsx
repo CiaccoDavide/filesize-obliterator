@@ -171,6 +171,7 @@ function App() {
               void compress.startStaged(staged, { stripMetadata })
             }
             onAbort={() => void compress.abortAll()}
+            onCancelOne={(jobId) => void compress.cancelOne(jobId)}
             onClearFinished={compress.clearFinished}
           />
 
