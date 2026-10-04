@@ -18,13 +18,13 @@ export const FileDropZone = forwardRef<HTMLDivElement, Props>(
       >
         <p className="panel-label">Intake</p>
         <p className="drop-copy">
-          Drop image / audio / video / PDF here.
+          Drop image / audio / video / PDF.
           <br />
-          Folders expand one level of supported files.
+          Folders expand one level.
         </p>
         <div className="drop-actions">
           <button type="button" className="btn primary" onClick={onPick}>
-            Browse files
+            Browse
           </button>
         </div>
         {children}
