@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { JobInfo } from "../ipc/compress";
+import { ENCODER_STALL_ERROR } from "./batchSummary";
 import {
   abortSurfaceErrorFromCancelResults,
   activeJobIds,
   applyCancelResults,
   applyCompressEvent,
+  awaitFailedEventAfterCancel,
   deriveOpsPhase,
   formatByteMeter,
   jobStatusToPhase,
@@ -109,6 +111,30 @@ describe("upsertJob", () => {
       outputPath: undefined,
     });
   });
+
+  it("preserves stall reason when cancelled JobInfo arrives after stall label", () => {
+    const stalled = [
+      row({
+        phase: "FAILED",
+        error: ENCODER_STALL_ERROR,
+        mediaKind: "video",
+      }),
+    ];
+    const next = upsertJob(
+      stalled,
+      baseJob({
+        status: "cancelled",
+        mediaKind: "video",
+        percent: 40,
+        error: "cancelled",
+      }),
+    );
+    expect(next[0]).toMatchObject({
+      phase: "FAILED",
+      error: ENCODER_STALL_ERROR,
+      outputPath: undefined,
+    });
+  });
 });
 
 describe("applyCompressEvent", () => {
@@ -167,6 +193,28 @@ describe("applyCompressEvent", () => {
     });
     expect(rows[0].phase).toBe("FAILED");
     expect(rows[0].error).toBe("encoder crashed");
+  });
+
+  it("does not let Failed cancelled overwrite an existing stall reason", () => {
+    const rows = applyCompressEvent(
+      [
+        row({
+          phase: "FAILED",
+          error: ENCODER_STALL_ERROR,
+          mediaKind: "video",
+        }),
+      ],
+      {
+        type: "failed",
+        jobId: "job-1",
+        error: "cancelled",
+      },
+    );
+    expect(rows[0]).toMatchObject({
+      phase: "FAILED",
+      error: ENCODER_STALL_ERROR,
+      outputPath: undefined,
+    });
   });
 
   it("normalizes permission errors and clears any output path on failed", () => {
@@ -311,6 +359,15 @@ describe("activeJobIds", () => {
   });
 });
 
+describe("awaitFailedEventAfterCancel", () => {
+  it("waits only for jobs that were already running at cancel time", () => {
+    expect(awaitFailedEventAfterCancel("COMPRESSING")).toBe(true);
+    expect(awaitFailedEventAfterCancel("ABORTING")).toBe(true);
+    expect(awaitFailedEventAfterCancel("AWAITING")).toBe(false);
+    expect(awaitFailedEventAfterCancel(undefined)).toBe(false);
+  });
+});
+
 describe("applyCancelResults", () => {
   it("upserts compressCancel JobInfo so rows leave ABORTING", () => {
     const aborting = markAborting(
@@ -332,6 +389,96 @@ describe("applyCancelResults", () => {
     expect(next[0].phase).toBe("FAILED");
     expect(next[0].error).toBe("cancelled");
     expect(deriveOpsPhase(next)).toBe("FAILED");
+  });
+
+  it("keeps running cancels in ABORTING until Failed when phasesAtCancel is set", () => {
+    const aborting = markAborting(
+      [
+        row({ jobId: "run", phase: "COMPRESSING", mediaKind: "video" }),
+        row({
+          jobId: "queued",
+          phase: "AWAITING",
+          sourcePath: "/tmp/b.png",
+        }),
+      ],
+      ["run", "queued"],
+    );
+    const phasesAtCancel = new Map([
+      ["run", "COMPRESSING" as const],
+      ["queued", "AWAITING" as const],
+    ]);
+    const next = applyCancelResults(
+      aborting,
+      ["run", "queued"],
+      [
+        {
+          status: "fulfilled",
+          value: baseJob({
+            id: "run",
+            status: "cancelled",
+            mediaKind: "video",
+            error: "cancelled",
+          }),
+        },
+        {
+          status: "fulfilled",
+          value: baseJob({
+            id: "queued",
+            sourcePath: "/tmp/b.png",
+            status: "cancelled",
+            error: "cancelled",
+          }),
+        },
+      ],
+      phasesAtCancel,
+    );
+    expect(next.find((r) => r.jobId === "run")?.phase).toBe("ABORTING");
+    expect(next.find((r) => r.jobId === "queued")).toMatchObject({
+      phase: "FAILED",
+      error: "cancelled",
+    });
+    // RETRY stays gated while any row is still ABORTING.
+    expect(deriveOpsPhase(next)).toBe("ABORTING");
+
+    const afterFailed = applyCompressEvent(next, {
+      type: "failed",
+      jobId: "run",
+      error: "cancelled",
+    });
+    expect(afterFailed.find((r) => r.jobId === "run")).toMatchObject({
+      phase: "FAILED",
+      error: "cancelled",
+    });
+    expect(deriveOpsPhase(afterFailed)).toBe("FAILED");
+  });
+
+  it("does not clobber stall-labeled FAILED when cancel JobInfo settles later", () => {
+    const stalled = [
+      row({
+        phase: "FAILED",
+        error: ENCODER_STALL_ERROR,
+        mediaKind: "video",
+      }),
+    ];
+    const next = applyCancelResults(
+      stalled,
+      ["job-1"],
+      [
+        {
+          status: "fulfilled",
+          value: baseJob({
+            status: "cancelled",
+            mediaKind: "video",
+            error: "cancelled",
+          }),
+        },
+      ],
+      new Map([["job-1", "COMPRESSING"]]),
+    );
+    expect(next[0]).toMatchObject({
+      phase: "FAILED",
+      error: ENCODER_STALL_ERROR,
+    });
   });
 
   it("clears reserved outputPath when cancel settles to FAILED", () => {

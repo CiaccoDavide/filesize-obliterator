@@ -20,7 +20,9 @@ import {
   applyCompressEvent,
   deriveOpsPhase,
   markAborting,
+  markFailed,
   upsertJob,
+  type OpsPhase,
   type ProgressRow,
 } from "../compress/progressState";
 import {
@@ -74,6 +76,8 @@ export function useCompressProgress() {
   const lastActivityRef = useRef<Map<string, number>>(new Map());
   /** Stall cancels in flight — avoid double-cancel before ABORTING is committed. */
   const stallCancelInFlightRef = useRef<Set<string>>(new Set());
+  /** Jobs cancelled by the stall watchdog — remap Failed{"cancelled"} to stall reason. */
+  const stallLabeledIdsRef = useRef<Set<string>>(new Set());
   const lastOptionsRef = useRef<StartStagedOptions>({});
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
@@ -91,7 +95,19 @@ export function useCompressProgress() {
         unlisten = await listenCompressEvents((event) => {
           if (cancelled) return;
           touchActivity(event.jobId);
-          setRows((prev) => applyCompressEvent(prev, event));
+          setRows((prev) => {
+            let ev = event;
+            if (
+              ev.type === "failed" &&
+              stallLabeledIdsRef.current.has(ev.jobId)
+            ) {
+              stallLabeledIdsRef.current.delete(ev.jobId);
+              if (normalizeOpsError(ev.error) === "cancelled") {
+                ev = { ...ev, error: ENCODER_STALL_ERROR };
+              }
+            }
+            return applyCompressEvent(prev, ev);
+          });
         });
       } catch {
         // Vite-only / non-Tauri: event bus unavailable.
@@ -106,7 +122,7 @@ export function useCompressProgress() {
   }, [touchActivity]);
 
   // Stall watchdog — cancel silent video jobs so reserved paths/.partial clean up.
-  // Mark ABORTING first so the batch stays non-terminal (RETRY stays off) until cancel settles.
+  // Keep ABORTING until Failed (after StagingCleanup) so RETRY stays off.
   useEffect(() => {
     const timer = window.setInterval(() => {
       const stalled = stalledJobIds(
@@ -117,7 +133,13 @@ export function useCompressProgress() {
       ).filter((id) => !stallCancelInFlightRef.current.has(id));
       if (stalled.length === 0) return;
 
-      for (const id of stalled) stallCancelInFlightRef.current.add(id);
+      const phasesAtCancel = new Map<string, OpsPhase>();
+      for (const id of stalled) {
+        stallCancelInFlightRef.current.add(id);
+        stallLabeledIdsRef.current.add(id);
+        const row = rowsRef.current.find((r) => r.jobId === id);
+        if (row) phasesAtCancel.set(id, row.phase);
+      }
       setRows((prev) => markAborting(prev, stalled));
 
       void (async () => {
@@ -126,17 +148,24 @@ export function useCompressProgress() {
             stalled.map((id) => compressCancel(id)),
           );
           setRows((prev) => {
-            const afterCancel = applyCancelResults(prev, stalled, results);
-            const stalledSet = new Set(stalled);
-            return afterCancel.map((row) =>
-              stalledSet.has(row.jobId) && row.phase === "FAILED"
-                ? {
-                    ...row,
-                    error: ENCODER_STALL_ERROR,
-                    outputPath: undefined,
-                  }
-                : row,
+            let next = applyCancelResults(
+              prev,
+              stalled,
+              results,
+              phasesAtCancel,
             );
+            // Cancel reject: no Failed event — surface stall reason and clear label.
+            for (let i = 0; i < stalled.length; i++) {
+              const id = stalled[i];
+              const result = results[i];
+              if (!result || result.status !== "rejected") continue;
+              stallLabeledIdsRef.current.delete(id);
+              const row = next.find((r) => r.jobId === id);
+              if (row?.phase === "FAILED") {
+                next = markFailed(next, id, ENCODER_STALL_ERROR);
+              }
+            }
+            return next;
           });
         } finally {
           for (const id of stalled) stallCancelInFlightRef.current.delete(id);
@@ -275,13 +304,23 @@ export function useCompressProgress() {
     // Union of HUD rows + admission-tracked ids so a job upserted during abort
     // (empty rows at setState time) is still cancelled.
     let ids: string[] = [];
+    const phasesAtCancel = new Map<string, OpsPhase>();
     setRows((prev) => {
       const fromRows = cancelableActiveIds(prev);
       ids = [...new Set([...fromRows, ...admittedIdsRef.current])];
+      for (const id of ids) {
+        phasesAtCancel.set(
+          id,
+          prev.find((r) => r.jobId === id)?.phase ?? "AWAITING",
+        );
+      }
       return ids.length === 0 ? prev : markAborting(prev, ids);
     });
     for (const id of admittedIdsRef.current) {
-      if (!ids.includes(id)) ids.push(id);
+      if (!ids.includes(id)) {
+        ids.push(id);
+        if (!phasesAtCancel.has(id)) phasesAtCancel.set(id, "AWAITING");
+      }
     }
     if (ids.length === 0) return;
 
@@ -292,7 +331,7 @@ export function useCompressProgress() {
     let surfaceError: string | null = null;
     setRows((prev) => {
       surfaceError = abortSurfaceErrorFromCancelResults(prev, ids, results);
-      return applyCancelResults(prev, ids, results);
+      return applyCancelResults(prev, ids, results, phasesAtCancel);
     });
     if (surfaceError) setError(normalizeOpsError(surfaceError));
   }, []);
@@ -307,13 +346,14 @@ export function useCompressProgress() {
     ) {
       return;
     }
+    const phasesAtCancel = new Map<string, OpsPhase>([[jobId, row.phase]]);
     setRows((prev) => markAborting(prev, [jobId]));
     setError(null);
     const results = await Promise.allSettled([compressCancel(jobId)]);
     let surfaceError: string | null = null;
     setRows((prev) => {
       surfaceError = abortSurfaceErrorFromCancelResults(prev, [jobId], results);
-      return applyCancelResults(prev, [jobId], results);
+      return applyCancelResults(prev, [jobId], results, phasesAtCancel);
     });
     if (surfaceError) setError(normalizeOpsError(surfaceError));
   }, []);

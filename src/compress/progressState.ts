@@ -1,5 +1,5 @@
 import type { CompressEvent, JobInfo, JobStatus } from "../ipc/compress";
-import { normalizeOpsError } from "./batchSummary";
+import { ENCODER_STALL_ERROR, normalizeOpsError } from "./batchSummary";
 
 /** Operational phase shown on the live HUD strip. */
 export type OpsPhase =
@@ -85,6 +85,20 @@ function placeholderRow(jobId: string): ProgressRow {
   };
 }
 
+/** Prefer stall watchdog reason over cancel's generic "cancelled". */
+function mergeOpsError(
+  existing: string | undefined,
+  incoming: string | undefined,
+): string | undefined {
+  if (
+    existing === ENCODER_STALL_ERROR &&
+    (incoming === undefined || incoming === "cancelled")
+  ) {
+    return ENCODER_STALL_ERROR;
+  }
+  return incoming ?? existing;
+}
+
 /** Merge JobInfo into an existing row without regressing event-driven progress. */
 export function mergeJobRow(
   existing: ProgressRow,
@@ -111,7 +125,7 @@ export function mergeJobRow(
     originalBytes: fromJob.originalBytes ?? existing.originalBytes,
     resultBytes: fromJob.resultBytes ?? existing.resultBytes,
     durationMs: fromJob.durationMs ?? existing.durationMs,
-    error: fromJob.error ?? existing.error,
+    error: mergeOpsError(existing.error, fromJob.error),
   };
 }
 
@@ -174,11 +188,24 @@ function rejectMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
 }
 
+/**
+ * True when compress_cancel returned for a job that was already running — the
+ * worker still owns StagingCleanup and will emit Failed after release. Keep
+ * ABORTING (RETRY gated) until that event; queued-only cancels never emit.
+ */
+export function awaitFailedEventAfterCancel(
+  phaseAtCancel: OpsPhase | undefined,
+): boolean {
+  return phaseAtCancel === "COMPRESSING" || phaseAtCancel === "ABORTING";
+}
+
 /** Apply compress_cancel PromiseSettled results — never leave rows stuck in ABORTING. */
 export function applyCancelResults(
   rows: ProgressRow[],
   ids: string[],
   results: PromiseSettledResult<JobInfo>[],
+  /** Phase before markAborting; running jobs stay ABORTING until Failed event. */
+  phasesAtCancel?: ReadonlyMap<string, OpsPhase>,
 ): ProgressRow[] {
   let next = rows;
   for (let i = 0; i < ids.length; i++) {
@@ -186,6 +213,16 @@ export function applyCancelResults(
     const result = results[i];
     if (!result) continue;
     if (result.status === "fulfilled") {
+      const existing = next.find((r) => r.jobId === id);
+      // Event already terminalized (e.g. Failed after cleanup) — don't clobber.
+      if (existing && isTerminalPhase(existing.phase)) continue;
+      if (
+        phasesAtCancel &&
+        awaitFailedEventAfterCancel(phasesAtCancel.get(id))
+      ) {
+        // Still cleaning up reserved/.partial — leave ABORTING for RETRY gate.
+        continue;
+      }
       next = upsertJob(next, result.value);
     } else {
       const existing = next.find((r) => r.jobId === id);
@@ -267,15 +304,20 @@ export function applyCompressEvent(
         error: undefined,
       };
       return copy;
-    case "failed":
+    case "failed": {
+      const incoming = normalizeOpsError(event.error);
+      // Stall watchdog cancel emits Failed{"cancelled"} after cleanup — keep
+      // the stall reason if the UI already labeled it (or caller remapped).
+      const error = mergeOpsError(row.error, incoming) ?? incoming;
       copy[idx] = {
         ...row,
         phase: "FAILED",
-        error: normalizeOpsError(event.error),
+        error,
         // Incomplete / reserved outputs are never success paths.
         outputPath: undefined,
       };
       return copy;
+    }
     default: {
       const _exhaustive: never = event;
       return _exhaustive;
