@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { JobInfo } from "../ipc/compress";
 import {
   activeJobIds,
+  applyCancelResults,
   applyCompressEvent,
   deriveOpsPhase,
   formatByteMeter,
@@ -127,14 +128,61 @@ describe("applyCompressEvent", () => {
     expect(rows[0].error).toBe("encoder crashed");
   });
 
-  it("ignores events for unknown jobs", () => {
-    const start = [row()];
-    const rows = applyCompressEvent(start, {
+  it("upserts a placeholder when progress arrives before start await", () => {
+    const rows = applyCompressEvent([], {
       type: "progress",
-      jobId: "missing",
+      jobId: "early-1",
       percent: 50,
+      bytesProcessed: 500,
+      bytesTotal: 1000,
     });
-    expect(rows).toBe(start);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      jobId: "early-1",
+      phase: "COMPRESSING",
+      percent: 50,
+      bytesProcessed: 500,
+      sourcePath: "—",
+    });
+  });
+
+  it("keeps early progress when upsertJob arrives after the event", () => {
+    const early = applyCompressEvent([], {
+      type: "progress",
+      jobId: "job-1",
+      percent: 40,
+      bytesProcessed: 400,
+      bytesTotal: 1000,
+    });
+    const merged = upsertJob(
+      early,
+      baseJob({ status: "queued", percent: 0 }),
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      jobId: "job-1",
+      sourcePath: "/tmp/a.png",
+      phase: "COMPRESSING",
+      percent: 40,
+      bytesProcessed: 400,
+    });
+  });
+
+  it("applies complete before start await without dropping the event", () => {
+    const rows = applyCompressEvent([], {
+      type: "complete",
+      jobId: "early-done",
+      outputPath: "/tmp/out.stub",
+      originalBytes: 1000,
+      resultBytes: 100,
+      durationMs: 12,
+    });
+    expect(rows[0]).toMatchObject({
+      jobId: "early-done",
+      phase: "COMPLETE",
+      outputPath: "/tmp/out.stub",
+      resultBytes: 100,
+    });
   });
 });
 
@@ -189,6 +237,56 @@ describe("activeJobIds", () => {
         row({ jobId: "c", phase: "ABORTING" }),
       ]),
     ).toEqual(["a", "c"]);
+  });
+});
+
+describe("applyCancelResults", () => {
+  it("upserts compressCancel JobInfo so rows leave ABORTING", () => {
+    const aborting = markAborting(
+      [row({ phase: "COMPRESSING" })],
+      ["job-1"],
+    );
+    expect(aborting[0].phase).toBe("ABORTING");
+
+    const next = applyCancelResults(aborting, ["job-1"], [
+      {
+        status: "fulfilled",
+        value: baseJob({
+          status: "cancelled",
+          percent: 20,
+          error: "cancelled",
+        }),
+      },
+    ]);
+    expect(next[0].phase).toBe("FAILED");
+    expect(next[0].error).toBe("cancelled");
+    expect(deriveOpsPhase(next)).toBe("FAILED");
+  });
+
+  it("marks FAILED on cancel rejection so rows never stick in ABORTING", () => {
+    const aborting = markAborting(
+      [
+        row({ jobId: "job-1", phase: "COMPRESSING" }),
+        row({ jobId: "job-2", phase: "AWAITING", sourcePath: "/tmp/b.png" }),
+      ],
+      ["job-1", "job-2"],
+    );
+
+    const next = applyCancelResults(aborting, ["job-1", "job-2"], [
+      {
+        status: "fulfilled",
+        value: baseJob({ status: "cancelled", error: "cancelled" }),
+      },
+      { status: "rejected", reason: new Error("ipc down") },
+    ]);
+
+    expect(next.find((r) => r.jobId === "job-1")?.phase).toBe("FAILED");
+    expect(next.find((r) => r.jobId === "job-2")).toMatchObject({
+      phase: "FAILED",
+      error: "ipc down",
+    });
+    expect(next.every((r) => r.phase !== "ABORTING")).toBe(true);
+    expect(deriveOpsPhase(next)).toBe("FAILED");
   });
 });
 

@@ -95,7 +95,7 @@ export function CompressProgressPanel({
             disabled={starting || stagedCount === 0 || canAbort}
             onClick={onStart}
           >
-            {starting ? "Starting" : "Compress"}
+            {starting ? "STARTING" : "COMPRESS"}
           </button>
           <button
             type="button"
@@ -106,22 +106,22 @@ export function CompressProgressPanel({
             {aborting ? (
               <>
                 <span className="abort-spinner" aria-hidden="true" />
-                Aborting
+                ABORTING
               </>
             ) : (
-              "Abort"
+              "ABORT"
             )}
           </button>
           {hasFinished ? (
             <button type="button" className="btn" onClick={onClearFinished}>
-              Clear done
+              CLEAR DONE
             </button>
           ) : null}
         </div>
       </div>
 
       {rows.length === 0 ? (
-        <p className="compress-empty mono">Awaiting compress jobs…</p>
+        <p className="compress-empty mono">AWAITING JOBS</p>
       ) : (
         <ul className="compress-list">
           {rows.map((row) => (

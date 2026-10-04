@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   activeJobIds,
+  applyCancelResults,
   applyCompressEvent,
   deriveOpsPhase,
   markAborting,
@@ -84,10 +85,16 @@ export function useCompressProgress() {
     if (ids.length === 0) return;
     setRows((prev) => markAborting(prev, ids));
     setError(null);
-    try {
-      await Promise.all(ids.map((id) => compressCancel(id)));
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+    const results = await Promise.allSettled(
+      ids.map((id) => compressCancel(id)),
+    );
+    setRows((prev) => applyCancelResults(prev, ids, results));
+    const firstReject = results.find(
+      (r): r is PromiseRejectedResult => r.status === "rejected",
+    );
+    if (firstReject) {
+      const reason = firstReject.reason;
+      setError(reason instanceof Error ? reason.message : String(reason));
     }
   }, [rows]);
 
