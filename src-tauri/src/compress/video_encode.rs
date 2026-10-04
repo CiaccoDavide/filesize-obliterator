@@ -139,7 +139,12 @@ fn parse_out_time_secs(line: &str) -> Option<f64> {
     None
 }
 
-fn build_ffmpeg_args(source: &Path, dest: &Path, target: &VideoEncodeTarget) -> Vec<String> {
+fn build_ffmpeg_args(
+    source: &Path,
+    dest: &Path,
+    target: &VideoEncodeTarget,
+    strip_metadata: bool,
+) -> Vec<String> {
     let mut args = vec![
         "-hide_banner".into(),
         "-y".into(),
@@ -164,6 +169,10 @@ fn build_ffmpeg_args(source: &Path, dest: &Path, target: &VideoEncodeTarget) -> 
         "pipe:1".into(),
         "-nostats".into(),
     ];
+    if strip_metadata {
+        args.push("-map_metadata".into());
+        args.push("-1".into());
+    }
     if let Some(h) = target.max_height {
         // Scale down only; never upscale. Width `-2` keeps aspect + even dims for yuv420p.
         args.push("-vf".into());
@@ -221,6 +230,7 @@ pub fn encode_video(
     dest: &Path,
     cancel: Option<&AtomicBool>,
     mut on_progress: Option<&mut dyn FnMut(f64) -> bool>,
+    strip_metadata: bool,
 ) -> Result<(), String> {
     let preset: &VideoPreset = video_preset(preset_id)
         .ok_or_else(|| format!("unknown video preset: {preset_id}"))?;
@@ -236,7 +246,7 @@ pub fn encode_video(
         return Err("cancelled".into());
     }
 
-    let args = build_ffmpeg_args(source, dest, &preset.target);
+    let args = build_ffmpeg_args(source, dest, &preset.target, strip_metadata);
     let mut child = Command::new(&ffmpeg)
         .args(&args)
         .stdout(Stdio::piped())
@@ -447,7 +457,7 @@ mod tests {
         let avi = dir.join("clip.avi");
         fs::write(&avi, b"fake").expect("write");
         let out = dir.join("out.mp4");
-        let err = encode_video(&avi, VIDEO_HIGH, &out, None, None).expect_err("avi unsupported");
+        let err = encode_video(&avi, VIDEO_HIGH, &out, None, None, true).expect_err("avi unsupported");
         assert!(err.contains("unsupported"), "{err}");
         assert!(!err.contains("missing tool"), "{err}");
         let _ = fs::remove_dir_all(&dir);
@@ -459,7 +469,7 @@ mod tests {
         let src = dir.join("a.mp4");
         fs::write(&src, b"x").unwrap();
         let out = dir.join("a.mp4");
-        let err = encode_video(&src, "nope", &out, None, None).expect_err("unknown");
+        let err = encode_video(&src, "nope", &out, None, None, true).expect_err("unknown");
         assert!(err.contains("unknown video preset"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -471,7 +481,7 @@ mod tests {
         let junk = dir.join("broken.mp4");
         fs::write(&junk, b"not-a-video-file").expect("write");
         let out = dir.join("out.mp4");
-        let err = encode_video(&junk, VIDEO_BALANCED, &out, None, None).expect_err("must fail");
+        let err = encode_video(&junk, VIDEO_BALANCED, &out, None, None, true).expect_err("must fail");
         assert!(
             err.contains("corrupt") || err.contains("unsupported") || err.contains("missing tool"),
             "unexpected error: {err}"
@@ -526,7 +536,7 @@ mod tests {
                 seen.lock().unwrap().push(p);
                 true
             };
-            encode_video(&src, preset, &out, None, Some(&mut on_progress))
+            encode_video(&src, preset, &out, None, Some(&mut on_progress), true)
                 .unwrap_or_else(|e| panic!("{preset}: {e}"));
             assert!(out.is_file(), "missing {preset}");
             assert!(fs::metadata(&out).unwrap().len() > 0);
@@ -593,7 +603,7 @@ mod tests {
 
         for preset in [VIDEO_BALANCED, VIDEO_SMALL] {
             let out = dir.join(format!("{preset}.mp4"));
-            encode_video(&src, preset, &out, None, None).unwrap_or_else(|e| panic!("{preset}: {e}"));
+            encode_video(&src, preset, &out, None, None, true).unwrap_or_else(|e| panic!("{preset}: {e}"));
             let result = fs::metadata(&out).unwrap().len();
             assert!(
                 result < original,
@@ -614,7 +624,7 @@ mod tests {
         let reserved = prepare_output_path(&src, preset.output_ext()).expect("reserve");
         assert_eq!(reserved, dir.join("_compressed").join("Holiday.mp4"));
 
-        encode_video(&src, VIDEO_BALANCED, &reserved, None, None).expect("encode");
+        encode_video(&src, VIDEO_BALANCED, &reserved, None, None, true).expect("encode");
         assert!(reserved.is_file());
         assert!(fs::metadata(&reserved).unwrap().len() > 0);
         assert!(fs::metadata(&src).unwrap().len() > 0);
@@ -631,7 +641,7 @@ mod tests {
         let out = dir.join("out.mp4");
         let cancel = AtomicBool::new(true);
         let err =
-            encode_video(&src, VIDEO_BALANCED, &out, Some(&cancel), None).expect_err("cancelled");
+            encode_video(&src, VIDEO_BALANCED, &out, Some(&cancel), None, true).expect_err("cancelled");
         assert_eq!(err, "cancelled");
         assert!(!out.exists());
         let _ = fs::remove_dir_all(&dir);
@@ -660,6 +670,7 @@ mod tests {
             &out,
             Some(&cancel),
             Some(&mut on_progress),
+            true,
         );
         assert_eq!(err.expect_err("expected cancel"), "cancelled");
         assert!(!out.exists());
@@ -683,7 +694,7 @@ mod tests {
             let src = fixture(name);
             assert!(src.is_file(), "missing fixture {}", src.display());
             let out = dir.join(format!("{name}.mp4"));
-            encode_video(&src, VIDEO_BALANCED, &out, None, None)
+            encode_video(&src, VIDEO_BALANCED, &out, None, None, true)
                 .unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(out.is_file());
             assert!(fs::metadata(&out).unwrap().len() > 0);

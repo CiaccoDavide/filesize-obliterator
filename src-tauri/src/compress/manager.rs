@@ -94,6 +94,7 @@ impl JobManager {
         let source_path = request.source_path;
         let preset_id = request.preset_id;
         let media_kind = request.media_kind;
+        let strip_metadata = request.strip_metadata;
         thread::spawn(move || {
             run_job(
                 manager,
@@ -102,6 +103,7 @@ impl JobManager {
                 source_path,
                 media_kind,
                 preset_id,
+                strip_metadata,
                 original_bytes,
                 cancel,
             );
@@ -303,6 +305,19 @@ fn resolve_output_ext(media_kind: &MediaKind, preset_id: &str) -> Result<&'stati
     }
 }
 
+/// Soft warning when strip was requested but the kind cannot honor it.
+fn strip_unsupported_warning(media_kind: &MediaKind, strip_metadata: bool) -> Option<&'static str> {
+    if !strip_metadata {
+        return None;
+    }
+    match media_kind {
+        MediaKind::Pdf => Some(
+            "warn: metadata strip unsupported for pdf; continuing without guarantee",
+        ),
+        MediaKind::Image | MediaKind::Audio | MediaKind::Video => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_job(
     manager: JobManager,
@@ -311,6 +326,7 @@ fn run_job(
     source_path: String,
     media_kind: MediaKind,
     preset_id: String,
+    strip_metadata: bool,
     original_bytes: u64,
     cancel: Arc<AtomicBool>,
 ) {
@@ -347,6 +363,15 @@ fn run_job(
             message: format!("{encoder_label} encoder started ({preset_id})"),
         },
     );
+    if let Some(warn) = strip_unsupported_warning(&media_kind, strip_metadata) {
+        emit(
+            &app,
+            CompressEvent::Log {
+                job_id: job_id.clone(),
+                message: warn.into(),
+            },
+        );
+    }
 
     let source = PathBuf::from(&source_path);
     let output_path = match prepare_output_path(&source, output_ext) {
@@ -407,7 +432,7 @@ fn run_job(
                 cancel_job(&manager, &app, job_id);
                 return;
             }
-            let result = encode_image(&source, &preset_id, &partial_path);
+            let result = encode_image(&source, &preset_id, &partial_path, strip_metadata);
             if result.is_ok() && !report_progress(90.0) {
                 release_reserved();
                 cancel_job(&manager, &app, job_id);
@@ -446,6 +471,7 @@ fn run_job(
                 &partial_path,
                 Some(cancel.as_ref()),
                 Some(&mut on_progress),
+                strip_metadata,
             );
             if result.is_ok() && !report_progress(96.0) {
                 release_reserved();
@@ -609,6 +635,15 @@ mod tests {
         assert_eq!(info.status, JobStatus::Cancelled);
         assert!(cancel.load(Ordering::SeqCst));
         assert!(manager.cancel(&id).is_err());
+    }
+
+    #[test]
+    fn strip_unsupported_warns_for_pdf_only() {
+        assert!(strip_unsupported_warning(&MediaKind::Pdf, true).is_some());
+        assert!(strip_unsupported_warning(&MediaKind::Pdf, false).is_none());
+        assert!(strip_unsupported_warning(&MediaKind::Image, true).is_none());
+        assert!(strip_unsupported_warning(&MediaKind::Audio, true).is_none());
+        assert!(strip_unsupported_warning(&MediaKind::Video, true).is_none());
     }
 
     #[test]

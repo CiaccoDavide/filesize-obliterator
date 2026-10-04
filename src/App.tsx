@@ -25,6 +25,8 @@ function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [pingResult, setPingResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Session privacy control — bound into compress_start as stripMetadata (default on). */
+  const [stripMetadata, setStripMetadata] = useState(true);
   const { staged, status, dragActive, pickFiles, clearStaged } = useFileIntake();
 
   useEffect(() => {
@@ -80,6 +82,29 @@ function App() {
               <StagedFileList files={staged} />
             </div>
           </FileDropZone>
+
+          <div className="hud-frame setup-surface">
+            <p className="panel-label">Privacy</p>
+            <label className="hud-toggle">
+              <input
+                type="checkbox"
+                checked={stripMetadata}
+                onChange={(e) => setStripMetadata(e.target.checked)}
+              />
+              <span className="hud-toggle-label">Strip metadata</span>
+              <span className="mono hud-toggle-state">
+                {stripMetadata ? "ON" : "OFF"}
+              </span>
+            </label>
+            <p className="hud-toggle-hint">
+              {stripMetadata
+                ? "EXIF/GPS removed on image/video outputs."
+                : "Preserve orientation and tags where the pipeline allows."}
+            </p>
+            <p className="hud-toggle-hint mono" data-testid="strip-metadata-payload">
+              compress_start.stripMetadata={String(stripMetadata)}
+            </p>
+          </div>
 
           <div className="hud-frame setup-surface">
             <p className="panel-label">Bridge</p>
