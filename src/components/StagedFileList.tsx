@@ -20,6 +20,9 @@ export function StagedFileList({ files }: Props) {
           <span className="staged-path mono" title={file.path}>
             {file.path}
           </span>
+          <span className="staged-preset mono" title={file.presetId || "unset"}>
+            {file.presetId || "—"}
+          </span>
           <span className="staged-size mono">{formatBytes(file.bytes)}</span>
         </li>
       ))}

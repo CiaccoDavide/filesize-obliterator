@@ -1,9 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { FileDropZone } from "./components/FileDropZone";
 import { IntakeStatus } from "./components/IntakeStatus";
+import { PresetPicker } from "./components/PresetPicker";
 import { StagedFileList } from "./components/StagedFileList";
+import { useCompressJobs } from "./hooks/useCompressJobs";
 import { useFileIntake } from "./hooks/useFileIntake";
+import { usePresets } from "./hooks/usePresets";
+import type { MediaKind } from "./ipc/compress";
+import { kindsPresent } from "./presets/selection";
 import "./App.css";
 
 type AppInfo = {
@@ -25,7 +30,24 @@ function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [pingResult, setPingResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const { staged, status, dragActive, pickFiles, clearStaged } = useFileIntake();
+  const presets = usePresets();
+  const {
+    staged,
+    status,
+    dragActive,
+    pickFiles,
+    clearStaged,
+    setKindPreset,
+    assignMissingPresets,
+  } = useFileIntake(presets.presetByKind);
+  const compress = useCompressJobs();
+
+  const presentKinds = useMemo(() => kindsPresent(staged), [staged]);
+
+  useEffect(() => {
+    if (!presets.loaded) return;
+    assignMissingPresets(presets.presetByKind);
+  }, [presets.loaded, presets.presetByKind, assignMissingPresets]);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,6 +74,16 @@ function App() {
       cancelled = true;
     };
   }, []);
+
+  function handlePresetSelect(kind: MediaKind, presetId: string) {
+    presets.setKindPreset(kind, presetId);
+    setKindPreset(kind, presetId);
+  }
+
+  const canStart =
+    staged.length > 0 &&
+    staged.every((f) => Boolean(f.presetId)) &&
+    compress.status !== "starting";
 
   return (
     <div className="app-shell">
@@ -80,6 +112,47 @@ function App() {
               <StagedFileList files={staged} />
             </div>
           </FileDropZone>
+
+          <PresetPicker
+            kinds={presentKinds}
+            byKind={presets.byKind}
+            selected={presets.presetByKind}
+            onSelect={handlePresetSelect}
+            disabled={!presets.loaded}
+          />
+
+          <div className="hud-frame compress-panel">
+            <div className="staged-head">
+              <p className="panel-label">Compress</p>
+              <button
+                type="button"
+                className="btn primary"
+                disabled={!canStart}
+                onClick={() => void compress.startStaged(staged)}
+              >
+                {compress.status === "starting" ? "Starting" : "Start"}
+              </button>
+            </div>
+            {presets.error ? (
+              <p className="compress-status tone-danger" role="alert">
+                PRESETS FAILED — {presets.error}
+              </p>
+            ) : null}
+            {compress.error ? (
+              <p className="compress-status tone-danger" role="alert">
+                {compress.error}
+              </p>
+            ) : null}
+            {compress.status === "started" ? (
+              <p className="compress-status" role="status">
+                STARTED {compress.jobs.length}
+              </p>
+            ) : (
+              <p className="compress-status">
+                AWAITING START
+              </p>
+            )}
+          </div>
 
           <div className="hud-frame setup-surface">
             <p className="panel-label">Bridge</p>
