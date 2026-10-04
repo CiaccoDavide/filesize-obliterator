@@ -1,0 +1,41 @@
+/* Local OFL fonts — Exo 2 (HUD) + JetBrains Mono (meters/paths). No CDN. */
+
+@font-face {
+  font-family: "Exo 2";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./exo-2-latin-400-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Exo 2";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./exo-2-latin-500-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Exo 2";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./exo-2-latin-600-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./jetbrains-mono-latin-400-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./jetbrains-mono-latin-500-normal.woff2") format("woff2");
+}
