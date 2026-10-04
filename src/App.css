@@ -334,7 +334,13 @@
 
 .compress-meters {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.4rem;
+}
+
+.compress-meters .meter-value.mono {
+  text-transform: none;
+  letter-spacing: 0.02em;
 }
 
 .compress-actions {
