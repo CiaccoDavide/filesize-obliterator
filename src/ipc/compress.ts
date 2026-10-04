@@ -15,6 +15,16 @@ export type CompressStartRequest = {
   sourcePath: string;
   mediaKind: MediaKind;
   presetId: string;
+  /** Default true when omitted by older callers — strip EXIF/GPS / container tags. */
+  stripMetadata?: boolean;
+};
+
+/** Mirrored from Rust `compress::presets::PresetInfo`. */
+export type PresetInfo = {
+  id: string;
+  label: string;
+  kind: MediaKind;
+  description: string;
 };
 
 export type JobInfo = {
@@ -64,6 +74,15 @@ export function compressStart(
   request: CompressStartRequest,
 ): Promise<JobInfo> {
   return invoke<JobInfo>("compress_start", { request });
+}
+
+/** List built-in presets from the Rust registry (optional kind filter). */
+export function compressListPresets(
+  kind?: MediaKind,
+): Promise<PresetInfo[]> {
+  return invoke<PresetInfo[]>("compress_list_presets", {
+    kind: kind ?? null,
+  });
 }
 
 export function compressCancel(jobId: string): Promise<JobInfo> {

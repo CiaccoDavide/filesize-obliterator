@@ -1,12 +1,19 @@
+mod audio_encode;
+mod format_support;
+mod image_encode;
 mod manager;
 mod output;
+mod pdf_encode;
+mod presets;
 mod state;
 mod types;
+mod video_encode;
+
+pub use format_support::{image_format_capabilities, FormatAvailability, FormatCapability};
 
 pub use manager::JobManager;
-pub use types::{
-    CompressEvent, CompressStartRequest, JobInfo, JobStatus, MediaKind, COMPRESS_EVENT,
-};
+pub use presets::{all_presets, presets_for_kind, PresetInfo};
+pub use types::{CompressStartRequest, JobInfo, MediaKind};
 
 use tauri::AppHandle;
 
@@ -30,4 +37,12 @@ pub fn compress_cancel(
 #[tauri::command]
 pub fn compress_list(manager: tauri::State<'_, JobManager>) -> Result<Vec<JobInfo>, String> {
     manager.list()
+}
+
+#[tauri::command]
+pub fn compress_list_presets(kind: Option<MediaKind>) -> Vec<PresetInfo> {
+    match kind {
+        Some(k) => presets_for_kind(&k),
+        None => all_presets(),
+    }
 }

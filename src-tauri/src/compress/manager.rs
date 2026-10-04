@@ -4,15 +4,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tauri::{AppHandle, Emitter};
 
+use super::audio_encode::encode_audio;
+use super::image_encode::{encode_image, resolve_image_output_ext};
 use super::output::prepare_output_path;
+use super::pdf_encode::encode_pdf;
+use super::presets::{audio_preset, pdf_preset, video_preset};
 use super::state::{apply_transition, should_continue, Transition, TransitionError};
 use super::types::{
-    CompressEvent, CompressStartRequest, JobInfo, JobStatus, COMPRESS_EVENT,
+    CompressEvent, CompressStartRequest, JobInfo, JobStatus, MediaKind, COMPRESS_EVENT,
 };
+use super::video_encode::encode_video;
 
 struct JobRecord {
     info: JobInfo,
@@ -88,13 +93,17 @@ impl JobManager {
         let manager = self.clone();
         let source_path = request.source_path;
         let preset_id = request.preset_id;
+        let media_kind = request.media_kind;
+        let strip_metadata = request.strip_metadata;
         thread::spawn(move || {
-            run_stub_job(
+            run_job(
                 manager,
                 app,
                 job_id,
                 source_path,
+                media_kind,
                 preset_id,
+                strip_metadata,
                 original_bytes,
                 cancel,
             );
@@ -251,12 +260,75 @@ fn emit(app: &AppHandle, event: CompressEvent) {
     let _ = app.emit(COMPRESS_EVENT, event);
 }
 
-fn run_stub_job(
+fn fail_job(manager: &JobManager, app: &AppHandle, job_id: String, error: String) {
+    let _ = manager.mark_failed(&job_id, error.clone());
+    emit(
+        app,
+        CompressEvent::Failed {
+            job_id,
+            error,
+        },
+    );
+}
+
+fn cancel_job(manager: &JobManager, app: &AppHandle, job_id: String) {
+    let error = "cancelled".to_string();
+    let _ = manager.mark_failed(&job_id, error.clone());
+    let _ = manager.with_job(&job_id, |record| {
+        record.info.status = JobStatus::Cancelled;
+        record.info.error = Some(error.clone());
+        Ok(())
+    });
+    emit(
+        app,
+        CompressEvent::Failed {
+            job_id,
+            error,
+        },
+    );
+}
+
+fn resolve_output_ext(
+    media_kind: &MediaKind,
+    preset_id: &str,
+    source: &Path,
+) -> Result<&'static str, String> {
+    match media_kind {
+        MediaKind::Image => resolve_image_output_ext(source, preset_id),
+        MediaKind::Audio => audio_preset(preset_id)
+            .map(|p| p.output_ext())
+            .ok_or_else(|| format!("unknown audio preset: {preset_id}")),
+        MediaKind::Video => video_preset(preset_id)
+            .map(|p| p.output_ext())
+            .ok_or_else(|| format!("unknown video preset: {preset_id}")),
+        MediaKind::Pdf => pdf_preset(preset_id)
+            .map(|p| p.output_ext())
+            .ok_or_else(|| format!("unknown pdf preset: {preset_id}")),
+    }
+}
+
+/// Soft warning when strip was requested but the kind cannot honor it.
+fn strip_unsupported_warning(media_kind: &MediaKind, strip_metadata: bool) -> Option<&'static str> {
+    if !strip_metadata {
+        return None;
+    }
+    match media_kind {
+        MediaKind::Pdf => Some(
+            "warn: metadata strip unsupported for pdf; continuing without guarantee",
+        ),
+        MediaKind::Image | MediaKind::Audio | MediaKind::Video => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_job(
     manager: JobManager,
     app: AppHandle,
     job_id: String,
     source_path: String,
+    media_kind: MediaKind,
     preset_id: String,
+    strip_metadata: bool,
     original_bytes: u64,
     cancel: Arc<AtomicBool>,
 ) {
@@ -268,38 +340,45 @@ fn run_stub_job(
         } else {
             e
         };
-        let _ = manager.mark_failed(&job_id, error.clone());
-        emit(
-            &app,
-            CompressEvent::Failed {
-                job_id,
-                error,
-            },
-        );
+        fail_job(&manager, &app, job_id, error);
         return;
     }
 
+    let source = PathBuf::from(&source_path);
+    let output_ext = match resolve_output_ext(&media_kind, &preset_id, &source) {
+        Ok(ext) => ext,
+        Err(error) => {
+            fail_job(&manager, &app, job_id, error);
+            return;
+        }
+    };
+
+    let encoder_label = match media_kind {
+        MediaKind::Image => "image",
+        MediaKind::Audio => "audio",
+        MediaKind::Video => "video",
+        MediaKind::Pdf => "pdf",
+    };
     emit(
         &app,
         CompressEvent::Log {
             job_id: job_id.clone(),
-            message: format!("stub encoder started ({preset_id})"),
+            message: format!("{encoder_label} encoder started ({preset_id})"),
         },
     );
-
-    let source = PathBuf::from(&source_path);
-    // Stub codec extension; real encoders pass their output ext / preset slug.
-    let output_path = match prepare_output_path(&source, "stub") {
+    if let Some(warn) = strip_unsupported_warning(&media_kind, strip_metadata) {
+        emit(
+            &app,
+            CompressEvent::Log {
+                job_id: job_id.clone(),
+                message: warn.into(),
+            },
+        );
+    }
+    let output_path = match prepare_output_path(&source, output_ext) {
         Ok(path) => path,
         Err(error) => {
-            let _ = manager.mark_failed(&job_id, error.clone());
-            emit(
-                &app,
-                CompressEvent::Failed {
-                    job_id,
-                    error,
-                },
-            );
+            fail_job(&manager, &app, job_id, error);
             return;
         }
     };
@@ -321,36 +400,13 @@ fn run_stub_job(
         let _ = fs::remove_file(&output_path);
     };
 
-    let steps = [0.0_f64, 20.0, 40.0, 60.0, 80.0, 100.0];
-    for percent in steps {
+    let report_progress = |percent: f64| -> bool {
         if cancel.load(Ordering::SeqCst) || manager.is_cancel_requested(&job_id) {
-            release_reserved();
-            let error = "cancelled".to_string();
-            let _ = manager.mark_failed(&job_id, error.clone());
-            // Ensure list status is Cancelled even if cancel raced after start.
-            let _ = manager.with_job(&job_id, |record| {
-                record.info.status = JobStatus::Cancelled;
-                record.info.error = Some(error.clone());
-                Ok(())
-            });
-            emit(
-                &app,
-                CompressEvent::Failed {
-                    job_id: job_id.clone(),
-                    error,
-                },
-            );
-            return;
+            return false;
         }
-
-        if !manager
-            .mark_progress(&job_id, percent)
-            .unwrap_or(false)
-        {
-            release_reserved();
-            return;
+        if !manager.mark_progress(&job_id, percent).unwrap_or(false) {
+            return false;
         }
-
         let bytes_processed = ((percent / 100.0) * original_bytes as f64) as u64;
         emit(
             &app,
@@ -361,64 +417,138 @@ fn run_stub_job(
                 bytes_total: Some(original_bytes),
             },
         );
+        true
+    };
 
-        // Simulate work; short so unit-ish manual runs stay snappy.
-        thread::sleep(Duration::from_millis(40));
+    if !report_progress(0.0) {
+        release_reserved();
+        cancel_job(&manager, &app, job_id);
+        return;
+    }
+
+    let encode_result = match media_kind {
+        MediaKind::Image => {
+            if !report_progress(20.0) {
+                release_reserved();
+                cancel_job(&manager, &app, job_id);
+                return;
+            }
+            let result = encode_image(&source, &preset_id, &partial_path, strip_metadata);
+            if result.is_ok() && !report_progress(90.0) {
+                release_reserved();
+                cancel_job(&manager, &app, job_id);
+                return;
+            }
+            result
+        }
+        MediaKind::Audio => {
+            if !report_progress(20.0) {
+                release_reserved();
+                cancel_job(&manager, &app, job_id);
+                return;
+            }
+            let result = encode_audio(&source, &preset_id, &partial_path, Some(cancel.as_ref()));
+            if result.is_ok() && !report_progress(90.0) {
+                release_reserved();
+                cancel_job(&manager, &app, job_id);
+                return;
+            }
+            result
+        }
+        MediaKind::Video => {
+            if !report_progress(1.0) {
+                release_reserved();
+                cancel_job(&manager, &app, job_id);
+                return;
+            }
+            let mut on_progress = |percent: f64| -> bool {
+                // Map encoder 0..=99 into job 1..=95 so finalize can still emit 100.
+                let mapped = (percent.clamp(0.0, 99.0) * 0.95).clamp(1.0, 95.0);
+                report_progress(mapped)
+            };
+            let result = encode_video(
+                &source,
+                &preset_id,
+                &partial_path,
+                Some(cancel.as_ref()),
+                Some(&mut on_progress),
+                strip_metadata,
+            );
+            if result.is_ok() && !report_progress(96.0) {
+                release_reserved();
+                cancel_job(&manager, &app, job_id);
+                return;
+            }
+            result
+        }
+        MediaKind::Pdf => {
+            if !report_progress(20.0) {
+                release_reserved();
+                cancel_job(&manager, &app, job_id);
+                return;
+            }
+            let result = encode_pdf(&source, &preset_id, &partial_path, Some(cancel.as_ref()));
+            if result.is_ok() && !report_progress(90.0) {
+                release_reserved();
+                cancel_job(&manager, &app, job_id);
+                return;
+            }
+            result
+        }
+    };
+
+    if let Err(error) = encode_result {
+        release_reserved();
+        if error == "cancelled" {
+            cancel_job(&manager, &app, job_id);
+        } else {
+            fail_job(&manager, &app, job_id, error);
+        }
+        return;
     }
 
     if cancel.load(Ordering::SeqCst) || manager.is_cancel_requested(&job_id) {
         release_reserved();
-        let error = "cancelled".to_string();
-        let _ = manager.mark_failed(&job_id, error.clone());
-        let _ = manager.with_job(&job_id, |record| {
-            record.info.status = JobStatus::Cancelled;
-            record.info.error = Some(error.clone());
-            Ok(())
-        });
-        emit(
-            &app,
-            CompressEvent::Failed {
-                job_id,
-                error,
-            },
-        );
+        cancel_job(&manager, &app, job_id);
         return;
     }
 
-    // Tiny stub "compressed" payload — real encoders land in later tasks.
-    let stub_bytes = b"fo-stub\n";
-    if let Err(e) = fs::write(&partial_path, stub_bytes) {
-        release_reserved();
-        let error = format!("write failed: {e}");
-        let _ = manager.mark_failed(&job_id, error.clone());
-        emit(
-            &app,
-            CompressEvent::Failed {
+    // Promote partial into the reserved final path without loading the whole file into RAM
+    // (video outputs can be large). Remove the empty reservation first so rename works on Windows.
+    let result_bytes = match fs::metadata(&partial_path).map(|m| m.len()) {
+        Ok(n) => n,
+        Err(e) => {
+            release_reserved();
+            fail_job(
+                &manager,
+                &app,
                 job_id,
-                error,
-            },
-        );
-        return;
+                format!("read partial failed: {e}"),
+            );
+            return;
+        }
+    };
+    let _ = fs::remove_file(&output_path);
+    if let Err(e) = fs::rename(&partial_path, &output_path) {
+        // Fallback copy if rename crosses volumes.
+        if let Err(copy_err) = fs::copy(&partial_path, &output_path) {
+            release_reserved();
+            fail_job(
+                &manager,
+                &app,
+                job_id,
+                format!("finalize failed: {e}; copy: {copy_err}"),
+            );
+            return;
+        }
+        let _ = fs::remove_file(&partial_path);
     }
 
-    // Promote into the reserved final path (overwrite placeholder). Avoid rename-over-existing
-    // so Windows and Unix behave the same while the reservation stays exclusive.
-    if let Err(e) = fs::write(&output_path, stub_bytes) {
-        release_reserved();
-        let error = format!("finalize failed: {e}");
-        let _ = manager.mark_failed(&job_id, error.clone());
-        emit(
-            &app,
-            CompressEvent::Failed {
-                job_id,
-                error,
-            },
-        );
+    if !report_progress(100.0) {
+        let _ = fs::remove_file(&output_path);
+        cancel_job(&manager, &app, job_id);
         return;
     }
-    let _ = fs::remove_file(&partial_path);
-
-    let result_bytes = stub_bytes.len() as u64;
     let duration_ms = started.elapsed().as_millis() as u64;
     let output_str = output_path.to_string_lossy().into_owned();
 
@@ -433,7 +563,7 @@ fn run_stub_job(
                 &app,
                 CompressEvent::Log {
                     job_id: job_id.clone(),
-                    message: "stub encoder finished".into(),
+                    message: format!("{encoder_label} encoder finished"),
                 },
             );
             emit(
@@ -450,31 +580,11 @@ fn run_stub_job(
         Ok(false) => {
             // Cancel won the race after write — do not leave success path artifacts.
             let _ = fs::remove_file(&output_path);
-            let error = "cancelled".to_string();
-            let _ = manager.mark_failed(&job_id, error.clone());
-            let _ = manager.with_job(&job_id, |record| {
-                record.info.status = JobStatus::Cancelled;
-                record.info.error = Some(error.clone());
-                Ok(())
-            });
-            emit(
-                &app,
-                CompressEvent::Failed {
-                    job_id,
-                    error,
-                },
-            );
+            cancel_job(&manager, &app, job_id);
         }
         Err(e) => {
             let _ = fs::remove_file(&output_path);
-            let _ = manager.mark_failed(&job_id, e.clone());
-            emit(
-                &app,
-                CompressEvent::Failed {
-                    job_id,
-                    error: e,
-                },
-            );
+            fail_job(&manager, &app, job_id, e);
         }
     }
 }
@@ -526,6 +636,15 @@ mod tests {
         assert_eq!(info.status, JobStatus::Cancelled);
         assert!(cancel.load(Ordering::SeqCst));
         assert!(manager.cancel(&id).is_err());
+    }
+
+    #[test]
+    fn strip_unsupported_warns_for_pdf_only() {
+        assert!(strip_unsupported_warning(&MediaKind::Pdf, true).is_some());
+        assert!(strip_unsupported_warning(&MediaKind::Pdf, false).is_none());
+        assert!(strip_unsupported_warning(&MediaKind::Image, true).is_none());
+        assert!(strip_unsupported_warning(&MediaKind::Audio, true).is_none());
+        assert!(strip_unsupported_warning(&MediaKind::Video, true).is_none());
     }
 
     #[test]

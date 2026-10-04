@@ -10,7 +10,10 @@ import {
  * Minimal smoke hook: starts one stub job against a path the caller supplies.
  * Live UI polish belongs to the Ice HUD work — this only proves IPC wiring.
  */
-export function useCompressDemo(sourcePath: string | null) {
+export function useCompressDemo(
+  sourcePath: string | null,
+  stripMetadata = true,
+) {
   const [job, setJob] = useState<JobInfo | null>(null);
   const [lastEvent, setLastEvent] = useState<CompressEvent | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -29,6 +32,7 @@ export function useCompressDemo(sourcePath: string | null) {
           sourcePath,
           mediaKind: "image",
           presetId: "stub",
+          stripMetadata,
         });
         if (!cancelled) setJob(started);
       } catch (err: unknown) {
@@ -43,7 +47,7 @@ export function useCompressDemo(sourcePath: string | null) {
       cancelled = true;
       unlisten?.();
     };
-  }, [sourcePath]);
+  }, [sourcePath, stripMetadata]);
 
   return { job, lastEvent, error };
 }

@@ -7,9 +7,20 @@ describe("detectKind", () => {
     expect(detectKind("C:\\photos\\a.webp")).toBe("image");
   });
 
+  it("classifies extended image formats (gif/tiff/heic)", () => {
+    expect(detectKind("/tmp/anim.gif")).toBe("image");
+    expect(detectKind("/tmp/scan.tiff")).toBe("image");
+    expect(detectKind("/tmp/scan.tif")).toBe("image");
+    expect(detectKind("/tmp/photo.heic")).toBe("image");
+    expect(detectKind("/tmp/photo.HEIF")).toBe("image");
+    expect(detectKind("/tmp/flat.bmp")).toBe("image");
+  });
+
   it("classifies audio, video, and pdf", () => {
     expect(detectKind("/a/track.mp3")).toBe("audio");
     expect(detectKind("/a/clip.mkv")).toBe("video");
+    expect(detectKind("/a/clip.3gp")).toBe("video");
+    expect(detectKind("/a/broadcast.ts")).toBe("video");
     expect(detectKind("/a/doc.PDF")).toBe("pdf");
   });
 

@@ -133,7 +133,7 @@
 
 .staged-row {
   display: grid;
-  grid-template-columns: 4.5rem minmax(0, 1fr) auto;
+  grid-template-columns: 4.5rem minmax(0, 1fr) minmax(5rem, auto) auto;
   gap: 0.55rem;
   align-items: baseline;
   padding: 0.4rem 0.5rem;
@@ -157,20 +157,131 @@
   white-space: nowrap;
 }
 
+.staged-preset {
+  font-size: 0.68rem;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 9rem;
+}
+
 .staged-size {
   font-size: 0.72rem;
   color: var(--muted);
   white-space: nowrap;
 }
 
-/* Compress live progress */
+.hud-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.hud-toggle input {
+  accent-color: var(--accent);
+  width: 0.95rem;
+  height: 0.95rem;
+  margin: 0;
+}
+
+.hud-toggle-label {
+  font-size: 0.65rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ice);
+}
+
+.hud-toggle-state {
+  margin-left: auto;
+  font-size: 0.72rem;
+  color: var(--accent);
+}
+
+.hud-toggle-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+/* Preset alternatives — square segment controls, not pills */
+.preset-panel,
 .compress-panel {
-  padding: 1rem 1.2rem;
+  padding: 1.1rem 1.25rem;
   display: flex;
   flex-direction: column;
   gap: 0.65rem;
 }
 
+.preset-kinds {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.preset-kind-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.preset-kind-block .panel-label {
+  margin: 0;
+}
+
+.preset-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  border: 1px solid var(--line);
+}
+
+.preset-option {
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  padding: 0.55rem 0.85rem;
+  cursor: pointer;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 0.62rem;
+  border-radius: 0;
+  font-family: var(--font-hud);
+}
+
+.preset-option:last-child {
+  border-right: 0;
+}
+
+.preset-option:hover:not(:disabled) {
+  color: var(--accent);
+  background: rgba(126, 182, 255, 0.06);
+}
+
+.preset-option.is-active {
+  color: var(--accent);
+  background: rgba(126, 182, 255, 0.12);
+}
+
+.preset-option:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.preset-desc,
+.preset-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+/* Compress live progress */
 .compress-top {
   display: flex;
   flex-wrap: wrap;
@@ -203,6 +314,16 @@
 
 .compress-status.tone-danger {
   color: var(--danger);
+  text-transform: none;
+  letter-spacing: 0.02em;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.compress-status.mono {
+  text-transform: none;
+  letter-spacing: 0.02em;
+  color: var(--muted);
 }
 
 .compress-error {

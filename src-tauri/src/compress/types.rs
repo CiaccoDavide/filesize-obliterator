@@ -19,12 +19,20 @@ pub enum JobStatus {
     Cancelled,
 }
 
+fn default_strip_metadata() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CompressStartRequest {
     pub source_path: String,
     pub media_kind: MediaKind,
     pub preset_id: String,
+    /// When true (default), strip sensitive metadata (EXIF/GPS on images; container tags on video).
+    /// When false, preserve orientation and non-sensitive tags where the pipeline allows.
+    #[serde(default = "default_strip_metadata")]
+    pub strip_metadata: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -127,5 +135,18 @@ mod tests {
         assert_eq!(req.source_path, "/a.png");
         assert_eq!(req.media_kind, MediaKind::Image);
         assert_eq!(req.preset_id, "stub");
+        assert!(req.strip_metadata, "stripMetadata defaults to true (safe)");
+
+        let pdf_raw =
+            r#"{"sourcePath":"/docs/report.pdf","mediaKind":"pdf","presetId":"pdf-ebook"}"#;
+        let pdf_req: CompressStartRequest = serde_json::from_str(pdf_raw).expect("de pdf");
+        assert_eq!(pdf_req.source_path, "/docs/report.pdf");
+        assert_eq!(pdf_req.media_kind, MediaKind::Pdf);
+        assert_eq!(pdf_req.preset_id, "pdf-ebook");
+        assert!(pdf_req.strip_metadata);
+
+        let strip_off = r#"{"sourcePath":"/a.jpg","mediaKind":"image","presetId":"image-high","stripMetadata":false}"#;
+        let off: CompressStartRequest = serde_json::from_str(strip_off).expect("de strip off");
+        assert!(!off.strip_metadata);
     }
 }

@@ -36,6 +36,11 @@ const VIDEO_EXT = new Set([
   "m4v",
   "mpeg",
   "mpg",
+  "3gp",
+  "3g2",
+  "ts",
+  "mts",
+  "m2ts",
 ]);
 
 function extensionOf(path: string): string {

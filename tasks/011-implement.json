@@ -1,0 +1,40 @@
+{
+  "issue": 11,
+  "task": "011-compression-alternatives-ui",
+  "branch": "ship/11-presets-ui",
+  "base": "origin/main",
+  "closes": "#11",
+  "status": "implemented",
+  "acceptance": [
+    {
+      "id": "lists-backend-presets",
+      "met": true,
+      "via": "compressListPresets → compress_list_presets; PresetPicker renders returned PresetInfo"
+    },
+    {
+      "id": "selection-wires-jobs",
+      "met": true,
+      "via": "StagedFile.presetId + Start → compress_start({ presetId })"
+    },
+    {
+      "id": "unsupported-kind-no-bogus",
+      "met": true,
+      "via": "Picker only for kindsPresent(staged); empty options show no presets"
+    },
+    {
+      "id": "ice-hud-controls",
+      "met": true,
+      "via": "Square segment .preset-option controls, micro labels, no pills"
+    }
+  ],
+  "defaults": {
+    "image": "image-balanced",
+    "audio": "audio-balanced",
+    "video": "video-balanced",
+    "pdf": "pdf-ebook"
+  },
+  "notes": [
+    "Progress PR #43 left as draft/needs-human; Start path is minimal (jobs started, no live panel).",
+    "Global-per-kind selection; per-file override deferred."
+  ]
+}

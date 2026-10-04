@@ -16,7 +16,9 @@ import {
 } from "../ipc/compress";
 import type { StagedFile } from "../intake/types";
 
-const STUB_PRESET = "stub";
+export type StartStagedOptions = {
+  stripMetadata?: boolean;
+};
 
 export function useCompressProgress() {
   const [rows, setRows] = useState<ProgressRow[]>([]);
@@ -58,25 +60,33 @@ export function useCompressProgress() {
   );
   const aborting = phase === "ABORTING";
 
-  const startStaged = useCallback(async (files: StagedFile[]) => {
-    if (files.length === 0) return;
-    setStarting(true);
-    setError(null);
-    try {
-      for (const file of files) {
-        const job = await compressStart({
-          sourcePath: file.path,
-          mediaKind: file.kind,
-          presetId: STUB_PRESET,
-        });
-        setRows((prev) => upsertJob(prev, job));
+  const startStaged = useCallback(
+    async (files: StagedFile[], options?: StartStagedOptions) => {
+      const ready = files.filter((f) => f.presetId);
+      if (ready.length === 0) {
+        setError("NO PRESET — select an alternative");
+        return;
       }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setStarting(false);
-    }
-  }, []);
+      setStarting(true);
+      setError(null);
+      try {
+        for (const file of ready) {
+          const job = await compressStart({
+            sourcePath: file.path,
+            mediaKind: file.kind,
+            presetId: file.presetId,
+            stripMetadata: options?.stripMetadata,
+          });
+          setRows((prev) => upsertJob(prev, job));
+        }
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setStarting(false);
+      }
+    },
+    [],
+  );
 
   const abortAll = useCallback(async () => {
     const ids = activeJobIds(rows).filter((id) => {
