@@ -414,7 +414,7 @@ fn run_job(
                 cancel_job(&manager, &app, job_id);
                 return;
             }
-            let result = encode_audio(&source, &preset_id, &partial_path);
+            let result = encode_audio(&source, &preset_id, &partial_path, Some(cancel.as_ref()));
             if result.is_ok() && !report_progress(90.0) {
                 release_reserved();
                 cancel_job(&manager, &app, job_id);
