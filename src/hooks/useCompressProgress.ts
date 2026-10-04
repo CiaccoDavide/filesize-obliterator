@@ -37,6 +37,7 @@ import type { StagedFile } from "../intake/types";
 
 export type StartStagedOptions = {
   stripMetadata?: boolean;
+  preferHardware?: boolean;
   force?: boolean;
 };
 
@@ -311,6 +312,7 @@ export function useCompressProgress() {
               mediaKind: file.kind,
               presetId: file.presetId,
               stripMetadata: lastOptionsRef.current.stripMetadata,
+              preferHardware: lastOptionsRef.current.preferHardware,
               force: lastOptionsRef.current.force,
             }),
           onAdmitted: (job) => {

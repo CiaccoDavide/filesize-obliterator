@@ -140,6 +140,16 @@ describe("upsertJob", () => {
 });
 
 describe("applyCompressEvent", () => {
+  it("surfaces log messages on the row status stream", () => {
+    const rows = applyCompressEvent([row({ phase: "COMPRESSING" })], {
+      type: "log",
+      jobId: "job-1",
+      message: "HW FALLBACK",
+    });
+    expect(rows[0].statusMessage).toBe("HW FALLBACK");
+    expect(rows[0].phase).toBe("COMPRESSING");
+  });
+
   it("updates percent and bytes on progress without refresh", () => {
     const rows = applyCompressEvent([row({ phase: "COMPRESSING" })], {
       type: "progress",

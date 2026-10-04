@@ -24,6 +24,10 @@ fn default_strip_metadata() -> bool {
     true
 }
 
+fn default_prefer_hardware() -> bool {
+    true
+}
+
 fn default_force() -> bool {
     false
 }
@@ -38,6 +42,10 @@ pub struct CompressStartRequest {
     /// When false, preserve orientation and non-sensitive tags where the pipeline allows.
     #[serde(default = "default_strip_metadata")]
     pub strip_metadata: bool,
+    /// When true (default), prefer a platform HW H.264 encoder for video when available.
+    /// Falls back to libx264 and logs `HW FALLBACK` if HW init fails.
+    #[serde(default = "default_prefer_hardware")]
+    pub prefer_hardware: bool,
     /// When true, re-encode even if an output already exists for this source+preset.
     /// Default false — skip duplicate work.
     #[serde(default = "default_force")]
@@ -145,6 +153,7 @@ mod tests {
         assert_eq!(req.media_kind, MediaKind::Image);
         assert_eq!(req.preset_id, "stub");
         assert!(req.strip_metadata, "stripMetadata defaults to true (safe)");
+        assert!(req.prefer_hardware, "preferHardware defaults to true");
         assert!(!req.force, "force defaults to false (skip duplicates)");
 
         let pdf_raw =
@@ -154,11 +163,16 @@ mod tests {
         assert_eq!(pdf_req.media_kind, MediaKind::Pdf);
         assert_eq!(pdf_req.preset_id, "pdf-ebook");
         assert!(pdf_req.strip_metadata);
+        assert!(pdf_req.prefer_hardware);
         assert!(!pdf_req.force);
 
         let strip_off = r#"{"sourcePath":"/a.jpg","mediaKind":"image","presetId":"image-high","stripMetadata":false}"#;
         let off: CompressStartRequest = serde_json::from_str(strip_off).expect("de strip off");
         assert!(!off.strip_metadata);
+
+        let hw_off = r#"{"sourcePath":"/a.mp4","mediaKind":"video","presetId":"video-balanced","preferHardware":false}"#;
+        let hw: CompressStartRequest = serde_json::from_str(hw_off).expect("de hw off");
+        assert!(!hw.prefer_hardware);
 
         let force_on = r#"{"sourcePath":"/a.jpg","mediaKind":"image","presetId":"image-high","force":true}"#;
         let forced: CompressStartRequest = serde_json::from_str(force_on).expect("de force");

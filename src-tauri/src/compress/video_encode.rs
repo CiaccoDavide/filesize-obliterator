@@ -144,36 +144,171 @@ fn parse_out_time_secs(line: &str) -> Option<f64> {
     None
 }
 
+/// Stable status string for the settings HUD capability probe.
+pub const HW_STATUS_READY: &str = "HW: READY";
+pub const HW_STATUS_UNAVAILABLE: &str = "HW: UNAVAILABLE";
+/// Emitted on the compress log/status stream when HW init fails and software takes over.
+pub const HW_FALLBACK_LOG: &str = "HW FALLBACK";
+
+/// Platform HW H.264 encoders we may select (bundled/local ffmpeg).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HwVideoEncoder {
+    VideoToolbox,
+    Nvenc,
+    Qsv,
+    Amf,
+}
+
+impl HwVideoEncoder {
+    pub fn ffmpeg_name(self) -> &'static str {
+        match self {
+            Self::VideoToolbox => "h264_videotoolbox",
+            Self::Nvenc => "h264_nvenc",
+            Self::Qsv => "h264_qsv",
+            Self::Amf => "h264_amf",
+        }
+    }
+}
+
+/// Preference order for the current OS (first listed-and-present wins).
+pub fn hw_encoder_candidates() -> &'static [HwVideoEncoder] {
+    if cfg!(target_os = "macos") {
+        &[HwVideoEncoder::VideoToolbox]
+    } else {
+        // Windows / Linux: probe NVENC, then QSV, then AMF.
+        &[
+            HwVideoEncoder::Nvenc,
+            HwVideoEncoder::Qsv,
+            HwVideoEncoder::Amf,
+        ]
+    }
+}
+
+/// Parse `ffmpeg -encoders` text for the first preferred HW encoder.
+pub fn select_hw_encoder_from_list(encoders_text: &str) -> Option<HwVideoEncoder> {
+    for candidate in hw_encoder_candidates() {
+        let name = candidate.ffmpeg_name();
+        // Match a whole encoder token (ffmpeg prints " V....D name  desc").
+        for line in encoders_text.lines() {
+            let mut parts = line.split_whitespace();
+            // flags token then name
+            let _flags = parts.next();
+            if parts.next() == Some(name) {
+                return Some(*candidate);
+            }
+        }
+    }
+    None
+}
+
+fn ffmpeg_encoders_text(ffmpeg: &Path) -> Option<String> {
+    let output = Command::new(ffmpeg)
+        .args(["-hide_banner", "-encoders"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Detect a usable HW H.264 encoder on this machine via local ffmpeg (offline).
+pub fn detect_hw_encoder(ffmpeg: &Path) -> Option<HwVideoEncoder> {
+    let text = ffmpeg_encoders_text(ffmpeg)?;
+    select_hw_encoder_from_list(&text)
+}
+
+/// UI / IPC capability probe: `HW: READY` or `HW: UNAVAILABLE`.
+pub fn hw_encode_status() -> &'static str {
+    match resolve_ffmpeg().ok().and_then(|ff| detect_hw_encoder(&ff)) {
+        Some(_) => HW_STATUS_READY,
+        None => HW_STATUS_UNAVAILABLE,
+    }
+}
+
+/// Map libx264 CRF (lower=better) onto VideoToolbox `-q:v` (1–100, lower=better).
+pub fn videotoolbox_q_from_crf(crf: u8) -> u8 {
+    // CRF 18 → ~40, 23 → ~52, 28 → ~65 (clamped).
+    let q = 40i32 + ((crf as i32 - 18) * 5) / 2;
+    q.clamp(20, 80) as u8
+}
+
+fn push_video_codec_args(args: &mut Vec<String>, target: &VideoEncodeTarget, hw: Option<HwVideoEncoder>) {
+    match hw {
+        None => {
+            args.push("-c:v".into());
+            args.push("libx264".into());
+            args.push("-preset".into());
+            args.push(target.x264_preset.into());
+            args.push("-crf".into());
+            args.push(target.crf.to_string());
+        }
+        Some(HwVideoEncoder::VideoToolbox) => {
+            args.push("-c:v".into());
+            args.push(HwVideoEncoder::VideoToolbox.ffmpeg_name().into());
+            args.push("-q:v".into());
+            args.push(videotoolbox_q_from_crf(target.crf).to_string());
+            // Force real HW; software VT path is our explicit libx264 fallback.
+            args.push("-allow_sw".into());
+            args.push("0".into());
+        }
+        Some(HwVideoEncoder::Nvenc) => {
+            args.push("-c:v".into());
+            args.push(HwVideoEncoder::Nvenc.ffmpeg_name().into());
+            args.push("-preset".into());
+            args.push("p4".into());
+            args.push("-rc".into());
+            args.push("vbr".into());
+            args.push("-cq".into());
+            args.push(target.crf.to_string());
+        }
+        Some(HwVideoEncoder::Qsv) => {
+            args.push("-c:v".into());
+            args.push(HwVideoEncoder::Qsv.ffmpeg_name().into());
+            args.push("-global_quality".into());
+            args.push(target.crf.to_string());
+        }
+        Some(HwVideoEncoder::Amf) => {
+            args.push("-c:v".into());
+            args.push(HwVideoEncoder::Amf.ffmpeg_name().into());
+            args.push("-rc".into());
+            args.push("cqp".into());
+            args.push("-qp_i".into());
+            args.push(target.crf.to_string());
+            args.push("-qp_p".into());
+            args.push(target.crf.to_string());
+        }
+    }
+}
+
 fn build_ffmpeg_args(
     source: &Path,
     dest: &Path,
     target: &VideoEncodeTarget,
     strip_metadata: bool,
+    hw: Option<HwVideoEncoder>,
 ) -> Vec<String> {
     let mut args = vec![
         "-hide_banner".into(),
         "-y".into(),
         "-i".into(),
         source.to_string_lossy().into_owned(),
-        "-c:v".into(),
-        "libx264".into(),
-        "-preset".into(),
-        target.x264_preset.into(),
-        "-crf".into(),
-        target.crf.to_string(),
-        "-c:a".into(),
-        "aac".into(),
-        "-b:a".into(),
-        format!("{}k", target.audio_kbps),
-        "-movflags".into(),
-        "+faststart".into(),
-        // Denser than the default ~0.5s so short encodes still emit mid-progress ticks.
-        "-stats_period".into(),
-        "0.2".into(),
-        "-progress".into(),
-        "pipe:1".into(),
-        "-nostats".into(),
     ];
+    push_video_codec_args(&mut args, target, hw);
+    args.push("-c:a".into());
+    args.push("aac".into());
+    args.push("-b:a".into());
+    args.push(format!("{}k", target.audio_kbps));
+    args.push("-movflags".into());
+    args.push("+faststart".into());
+    // Denser than the default ~0.5s so short encodes still emit mid-progress ticks.
+    args.push("-stats_period".into());
+    args.push("0.2".into());
+    args.push("-progress".into());
+    args.push("pipe:1".into());
+    args.push("-nostats".into());
     if strip_metadata {
         args.push("-map_metadata".into());
         args.push("-1".into());
@@ -225,35 +360,16 @@ fn map_ffmpeg_failure(stderr: &str, status_code: Option<i32>) -> String {
     )
 }
 
-/// Compress `source` with a registered video preset into `dest` (MP4).
-///
-/// `on_progress` receives percent in `0.0..=100.0` during the encode; return `false` to stop.
-/// When `cancel` is set, the ffmpeg child is killed and the error is `"cancelled"`.
-pub fn encode_video(
-    source: &Path,
-    preset_id: &str,
+fn run_ffmpeg_encode(
+    ffmpeg: &Path,
+    args: &[String],
     dest: &Path,
+    duration: Option<f64>,
     cancel: Option<&AtomicBool>,
-    mut on_progress: Option<&mut dyn FnMut(f64) -> bool>,
-    strip_metadata: bool,
+    on_progress: &mut Option<&mut dyn FnMut(f64) -> bool>,
 ) -> Result<(), String> {
-    let preset: &VideoPreset = video_preset(preset_id)
-        .ok_or_else(|| format!("unknown video preset: {preset_id}"))?;
-    reject_unsupported_container(source)?;
-    if cancelled(cancel) {
-        return Err("cancelled".into());
-    }
-
-    let ffmpeg = resolve_ffmpeg()?;
-    let duration = probe_duration_secs(&ffmpeg, source);
-
-    if cancelled(cancel) {
-        return Err("cancelled".into());
-    }
-
-    let args = build_ffmpeg_args(source, dest, &preset.target, strip_metadata);
-    let mut child = Command::new(&ffmpeg)
-        .args(&args)
+    let mut child = Command::new(ffmpeg)
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -365,6 +481,65 @@ pub fn encode_video(
         let _ = cb(99.0);
     }
     Ok(())
+}
+
+/// Compress `source` with a registered video preset into `dest` (MP4).
+///
+/// `on_progress` receives percent in `0.0..=100.0` during the encode; return `false` to stop.
+/// When `cancel` is set, the ffmpeg child is killed and the error is `"cancelled"`.
+/// When `prefer_hardware` is true and a platform HW encoder is listed by ffmpeg, try it first;
+/// on failure (other than cancel), emit [`HW_FALLBACK_LOG`] via `on_log` and retry with libx264.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_video(
+    source: &Path,
+    preset_id: &str,
+    dest: &Path,
+    cancel: Option<&AtomicBool>,
+    mut on_progress: Option<&mut dyn FnMut(f64) -> bool>,
+    strip_metadata: bool,
+    prefer_hardware: bool,
+    mut on_log: Option<&mut dyn FnMut(&str)>,
+) -> Result<(), String> {
+    let preset: &VideoPreset = video_preset(preset_id)
+        .ok_or_else(|| format!("unknown video preset: {preset_id}"))?;
+    reject_unsupported_container(source)?;
+    if cancelled(cancel) {
+        return Err("cancelled".into());
+    }
+
+    let ffmpeg = resolve_ffmpeg()?;
+    let duration = probe_duration_secs(&ffmpeg, source);
+
+    if cancelled(cancel) {
+        return Err("cancelled".into());
+    }
+
+    let hw = if prefer_hardware {
+        detect_hw_encoder(&ffmpeg)
+    } else {
+        None
+    };
+
+    if let Some(encoder) = hw {
+        let args = build_ffmpeg_args(source, dest, &preset.target, strip_metadata, Some(encoder));
+        match run_ffmpeg_encode(&ffmpeg, &args, dest, duration, cancel, &mut on_progress) {
+            Ok(()) => return Ok(()),
+            Err(e) if e == "cancelled" => return Err(e),
+            Err(_) => {
+                let _ = std::fs::remove_file(dest);
+                if let Some(log) = on_log.as_mut() {
+                    log(HW_FALLBACK_LOG);
+                }
+            }
+        }
+    }
+
+    if cancelled(cancel) {
+        return Err("cancelled".into());
+    }
+
+    let args = build_ffmpeg_args(source, dest, &preset.target, strip_metadata, None);
+    run_ffmpeg_encode(&ffmpeg, &args, dest, duration, cancel, &mut on_progress)
 }
 
 #[cfg(test)]
@@ -500,7 +675,8 @@ mod tests {
         let avi = dir.join("clip.avi");
         fs::write(&avi, b"fake").expect("write");
         let out = dir.join("out.mp4");
-        let err = encode_video(&avi, VIDEO_HIGH, &out, None, None, true).expect_err("avi unsupported");
+        let err = encode_video(&avi, VIDEO_HIGH, &out, None, None, true, false, None)
+            .expect_err("avi unsupported");
         assert!(err.contains("unsupported"), "{err}");
         assert!(!err.contains("missing tool"), "{err}");
         let _ = fs::remove_dir_all(&dir);
@@ -512,7 +688,7 @@ mod tests {
         let src = dir.join("a.mp4");
         fs::write(&src, b"x").unwrap();
         let out = dir.join("a.mp4");
-        let err = encode_video(&src, "nope", &out, None, None, true).expect_err("unknown");
+        let err = encode_video(&src, "nope", &out, None, None, true, false, None).expect_err("unknown");
         assert!(err.contains("unknown video preset"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -526,7 +702,8 @@ mod tests {
         let junk = dir.join("broken.mp4");
         fs::write(&junk, b"not-a-video-file").expect("write");
         let out = dir.join("out.mp4");
-        let err = encode_video(&junk, VIDEO_BALANCED, &out, None, None, true).expect_err("must fail");
+        let err = encode_video(&junk, VIDEO_BALANCED, &out, None, None, true, false, None)
+            .expect_err("must fail");
         assert!(
             err.contains("corrupt") || err.contains("unsupported") || err.contains("missing tool"),
             "unexpected error: {err}"
@@ -584,7 +761,7 @@ mod tests {
                 seen.lock().unwrap().push(p);
                 true
             };
-            encode_video(&src, preset, &out, None, Some(&mut on_progress), true)
+            encode_video(&src, preset, &out, None, Some(&mut on_progress), true, false, None)
                 .unwrap_or_else(|e| panic!("{preset}: {e}"));
             assert!(out.is_file(), "missing {preset}");
             assert!(fs::metadata(&out).unwrap().len() > 0);
@@ -652,7 +829,8 @@ mod tests {
 
         for preset in [VIDEO_BALANCED, VIDEO_SMALL] {
             let out = dir.join(format!("{preset}.mp4"));
-            encode_video(&src, preset, &out, None, None, true).unwrap_or_else(|e| panic!("{preset}: {e}"));
+            encode_video(&src, preset, &out, None, None, true, false, None)
+                .unwrap_or_else(|e| panic!("{preset}: {e}"));
             let result = fs::metadata(&out).unwrap().len();
             assert!(
                 result < original,
@@ -681,7 +859,7 @@ mod tests {
         let reserved = prepare_output_path(&src, preset.output_ext()).expect("reserve");
         assert_eq!(reserved, dir.join("_compressed").join("Holiday.mp4"));
 
-        encode_video(&src, VIDEO_BALANCED, &reserved, None, None, true).expect("encode");
+        encode_video(&src, VIDEO_BALANCED, &reserved, None, None, true, false, None).expect("encode");
         assert!(reserved.is_file());
         assert!(fs::metadata(&reserved).unwrap().len() > 0);
         assert!(fs::metadata(&src).unwrap().len() > 0);
@@ -700,7 +878,8 @@ mod tests {
         let out = dir.join("out.mp4");
         let cancel = AtomicBool::new(true);
         let err =
-            encode_video(&src, VIDEO_BALANCED, &out, Some(&cancel), None, true).expect_err("cancelled");
+            encode_video(&src, VIDEO_BALANCED, &out, Some(&cancel), None, true, false, None)
+                .expect_err("cancelled");
         assert_eq!(err, "cancelled");
         assert!(!out.exists());
         let _ = fs::remove_dir_all(&dir);
@@ -730,6 +909,8 @@ mod tests {
             Some(cancel.as_ref()),
             None,
             true,
+            false,
+            None,
         );
         let _ = watcher.join();
         assert_eq!(err.expect_err("expected cancel"), "cancelled");
@@ -763,6 +944,8 @@ mod tests {
             Some(&cancel),
             Some(&mut on_progress),
             true,
+            false,
+            None,
         );
         assert_eq!(err.expect_err("expected cancel"), "cancelled");
         assert!(!out.exists());
@@ -788,11 +971,117 @@ mod tests {
             let src = fixture(name);
             assert!(src.is_file(), "missing fixture {}", src.display());
             let out = dir.join(format!("{name}.mp4"));
-            encode_video(&src, VIDEO_BALANCED, &out, None, None, true)
+            encode_video(&src, VIDEO_BALANCED, &out, None, None, true, false, None)
                 .unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(out.is_file());
             assert!(fs::metadata(&out).unwrap().len() > 0);
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn selects_videotoolbox_from_encoder_list_on_macos() {
+        let sample = "\
+ Encoders:
+ V....D libx264              libx264 H.264
+ V....D h264_videotoolbox    VideoToolbox H.264 Encoder
+ V..... h264_nvenc           NVIDIA NVENC H.264 encoder
+";
+        let selected = select_hw_encoder_from_list(sample);
+        if cfg!(target_os = "macos") {
+            assert_eq!(selected, Some(HwVideoEncoder::VideoToolbox));
+        } else {
+            // Non-macOS candidates prefer nvenc when listed.
+            assert_eq!(selected, Some(HwVideoEncoder::Nvenc));
+        }
+    }
+
+    #[test]
+    fn empty_encoder_list_means_unavailable() {
+        assert_eq!(select_hw_encoder_from_list("Encoders:\n V....D libx264\n"), None);
+        assert_eq!(hw_encode_status() == HW_STATUS_READY || hw_encode_status() == HW_STATUS_UNAVAILABLE, true);
+    }
+
+    #[test]
+    fn videotoolbox_q_tracks_crf_presets() {
+        assert_eq!(videotoolbox_q_from_crf(18), 40);
+        assert_eq!(videotoolbox_q_from_crf(23), 52);
+        assert_eq!(videotoolbox_q_from_crf(28), 65);
+    }
+
+    #[test]
+    fn software_args_still_use_libx264() {
+        let src = Path::new("/tmp/in.mp4");
+        let dest = Path::new("/tmp/out.mp4");
+        let target = video_preset(VIDEO_BALANCED).unwrap().target;
+        let args = build_ffmpeg_args(src, dest, &target, true, None);
+        assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "libx264"));
+        assert!(args.iter().any(|a| a == "-crf"));
+    }
+
+    #[test]
+    fn hw_args_use_platform_encoder_not_libx264() {
+        let src = Path::new("/tmp/in.mp4");
+        let dest = Path::new("/tmp/out.mp4");
+        let target = video_preset(VIDEO_HIGH).unwrap().target;
+        let args = build_ffmpeg_args(src, dest, &target, true, Some(HwVideoEncoder::VideoToolbox));
+        assert!(args.windows(2).any(|w| w[0] == "-c:v" && w[1] == "h264_videotoolbox"));
+        assert!(!args.iter().any(|a| a == "libx264"));
+    }
+
+    #[test]
+    fn prefer_hardware_smoke_encode_when_ready() {
+        let Some(ffmpeg) = require_ffmpeg() else {
+            return;
+        };
+        let Some(hw) = detect_hw_encoder(&ffmpeg) else {
+            eprintln!("ignoring test: no HW encoder ({})", hw_encode_status());
+            assert_eq!(hw_encode_status(), HW_STATUS_UNAVAILABLE);
+            return;
+        };
+        assert_eq!(hw_encode_status(), HW_STATUS_READY);
+        let dir = temp_dir("hw-smoke");
+        let src = dir.join("tone.mp4");
+        write_fixture_mp4(&src, 0.5);
+        let out = dir.join("hw.mp4");
+        let logs = std::sync::Mutex::new(Vec::<String>::new());
+        let mut on_log = |msg: &str| {
+            logs.lock().unwrap().push(msg.to_string());
+        };
+        encode_video(
+            &src,
+            VIDEO_SMALL,
+            &out,
+            None,
+            None,
+            true,
+            true,
+            Some(&mut on_log),
+        )
+        .unwrap_or_else(|e| panic!("HW prefer encode failed ({hw:?}): {e}"));
+        assert!(out.is_file());
+        assert!(fs::metadata(&out).unwrap().len() > 0);
+        // Successful HW path should not emit fallback.
+        assert!(
+            !logs.lock().unwrap().iter().any(|m| m == HW_FALLBACK_LOG),
+            "unexpected fallback on ready HW: {:?}",
+            logs.lock().unwrap()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn software_path_works_when_hardware_not_preferred() {
+        let Some(_) = require_ffmpeg() else {
+            return;
+        };
+        let dir = temp_dir("sw-only");
+        let src = dir.join("tone.mp4");
+        write_fixture_mp4(&src, 0.4);
+        let out = dir.join("sw.mp4");
+        encode_video(&src, VIDEO_SMALL, &out, None, None, true, false, None)
+            .expect("software encode");
+        assert!(out.is_file());
         let _ = fs::remove_dir_all(&dir);
     }
 }

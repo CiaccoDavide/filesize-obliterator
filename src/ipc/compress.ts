@@ -18,6 +18,8 @@ export type CompressStartRequest = {
   presetId: string;
   /** Default true when omitted by older callers — strip EXIF/GPS / container tags. */
   stripMetadata?: boolean;
+  /** Default true — prefer HW video encode when available; falls back to software. */
+  preferHardware?: boolean;
   /** Default false — skip when an output already exists for this source+preset. */
   force?: boolean;
 };
@@ -120,6 +122,11 @@ export function compressEstimate(
   request: CompressEstimateRequest,
 ): Promise<CompressEstimateResult> {
   return invoke<CompressEstimateResult>("compress_estimate", { request });
+}
+
+/** Offline HW encode probe — `HW: READY` or `HW: UNAVAILABLE`. */
+export function compressHwEncodeStatus(): Promise<string> {
+  return invoke<string>("compress_hw_encode_status");
 }
 
 export function listenCompressEvents(

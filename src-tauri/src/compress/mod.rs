@@ -20,6 +20,7 @@ pub use image_encode::needs_webview_raster;
 pub use manager::JobManager;
 pub use presets::{all_presets, presets_for_kind, PresetInfo};
 pub use types::{CompressStartRequest, JobInfo, MediaKind};
+pub use video_encode::hw_encode_status;
 
 use tauri::AppHandle;
 
@@ -59,4 +60,10 @@ pub fn compress_estimate(
     request: CompressEstimateRequest,
 ) -> Result<CompressEstimateResult, String> {
     estimate::estimate_request(request)
+}
+
+/// Offline HW encode capability probe for the settings HUD (`HW: READY` / `HW: UNAVAILABLE`).
+#[tauri::command]
+pub fn compress_hw_encode_status() -> &'static str {
+    hw_encode_status()
 }

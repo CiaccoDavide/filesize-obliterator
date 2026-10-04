@@ -235,6 +235,7 @@ impl JobManager {
         let preset_id = request.preset_id.clone();
         let media_kind = request.media_kind.clone();
         let strip_metadata = request.strip_metadata;
+        let prefer_hardware = request.prefer_hardware;
 
         self.admit(request, original_bytes, move |job_id, cancel| {
             run_job(
@@ -245,6 +246,7 @@ impl JobManager {
                 media_kind,
                 preset_id,
                 strip_metadata,
+                prefer_hardware,
                 original_bytes,
                 cancel,
             );
@@ -617,6 +619,7 @@ impl JobManager {
             media_kind: MediaKind::Image,
             preset_id: "balanced".into(),
             strip_metadata: true,
+            prefer_hardware: true,
             force: false,
         };
         self.admit(request, original_bytes, move |_job_id, cancel| work(cancel))
@@ -776,6 +779,7 @@ fn run_job(
     media_kind: MediaKind,
     preset_id: String,
     strip_metadata: bool,
+    prefer_hardware: bool,
     original_bytes: u64,
     cancel: Arc<AtomicBool>,
 ) {
@@ -952,6 +956,17 @@ fn run_job(
                     let mapped = (percent.clamp(0.0, 99.0) * 0.95).clamp(1.0, 95.0);
                     report(mapped)
                 };
+                let app_log = app_progress.clone();
+                let job_id_log = job_id_progress.clone();
+                let mut on_log = move |message: &str| {
+                    emit(
+                        &app_log,
+                        CompressEvent::Log {
+                            job_id: job_id_log.clone(),
+                            message: message.into(),
+                        },
+                    );
+                };
                 encode_video(
                     &source,
                     &preset_id,
@@ -959,6 +974,8 @@ fn run_job(
                     Some(cancel_flag.as_ref()),
                     Some(&mut on_progress),
                     strip_metadata,
+                    prefer_hardware,
+                    Some(&mut on_log),
                 )
             });
             if outcome.result.is_ok() && !report_progress(96.0) {
@@ -1528,6 +1545,7 @@ mod tests {
             media_kind: MediaKind::Image,
             preset_id: "image-balanced".into(),
             strip_metadata: true,
+            prefer_hardware: true,
             force: false,
         };
         let existing = existing_output_to_skip(&request, &source).expect("should skip");
@@ -1758,6 +1776,7 @@ mod tests {
             media_kind: MediaKind::Image,
             preset_id: "image-balanced".into(),
             strip_metadata: true,
+            prefer_hardware: true,
             force: true,
         };
         assert_eq!(existing_output_to_skip(&request, &source), None);
