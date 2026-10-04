@@ -327,6 +327,12 @@ mod tests {
         dir
     }
 
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/image")
+            .join(name)
+    }
+
     fn write_gradient_png(path: &Path, w: u32, h: u32) {
         let img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_fn(w, h, |x, y| {
             Rgba([
@@ -658,8 +664,14 @@ mod tests {
         use crate::compress::presets::image_preset;
 
         let dir = temp_dir("smoke-path");
+        let fixture_src = fixture("sample.png");
+        assert!(
+            fixture_src.is_file(),
+            "missing fixture {}",
+            fixture_src.display()
+        );
         let png = dir.join("Holiday.PNG");
-        write_gradient_png(&png, 48, 48);
+        fs::copy(&fixture_src, &png).expect("copy committed image fixture");
 
         let preset = image_preset(IMAGE_BALANCED).expect("preset");
         let reserved = prepare_output_path(&png, preset.output_ext()).expect("reserve");
