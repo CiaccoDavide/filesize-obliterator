@@ -374,6 +374,8 @@ export function useCompressProgress() {
   /**
    * Additive enqueue for watch-folder ready files — does not reset the batch
    * or clear existing HUD rows (unlike startStaged / admitTargets).
+   * Stamps the current admission generation so watch rows participate in
+   * buildBatchSummary / completion scoping after a prior COMPRESS (gen ≥ 1).
    */
   const enqueueWatchFiles = useCallback(
     async (files: StagedFile[], options?: StartStagedOptions) => {
@@ -381,6 +383,7 @@ export function useCompressProgress() {
         lastOptionsRef.current = { ...lastOptionsRef.current, ...options };
       }
       const opts = lastOptionsRef.current;
+      const token = admissionRef.current.current();
       for (const file of files) {
         if (!file.presetId) continue;
         const kind = asMediaKind(file.kind);
@@ -396,7 +399,12 @@ export function useCompressProgress() {
           });
           admittedIdsRef.current.add(job.id);
           touchActivity(job.id);
-          setRows((prev) => upsertJob(prev, job));
+          setRows((prev) => {
+            const next = upsertJob(prev, job);
+            return next.map((r) =>
+              r.jobId === job.id ? { ...r, batchGeneration: token } : r,
+            );
+          });
           setError(null);
         } catch (err: unknown) {
           const message = errorMessage(err);
@@ -411,6 +419,7 @@ export function useCompressProgress() {
               phase: "FAILED",
               percent: 0,
               error: message,
+              batchGeneration: token,
             },
           ]);
         }

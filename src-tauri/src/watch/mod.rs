@@ -173,11 +173,13 @@ fn run_watch_loop(
 
     let mut tracker = SizeStableTracker::new(Duration::from_millis(DEFAULT_STABLE_MS));
     if !include_existing {
-        let existing: Vec<String> = list_immediate_files(&root)
-            .into_iter()
-            .filter_map(|p| p.to_str().map(|s| s.to_string()))
-            .collect();
-        tracker.ignore_existing(existing);
+        if let Ok(files) = list_immediate_files(&root) {
+            let existing: Vec<String> = files
+                .into_iter()
+                .filter_map(|p| p.to_str().map(|s| s.to_string()))
+                .collect();
+            tracker.ignore_existing(existing);
+        }
     }
 
     while !stop.load(Ordering::SeqCst) {
@@ -196,7 +198,11 @@ fn run_watch_loop(
 }
 
 fn poll_once(app: &AppHandle, root: &Path, tracker: &mut SizeStableTracker) {
-    let files = list_immediate_files(root);
+    // Listing errors must not look like an empty directory — retain_only([])
+    // would clear include-existing ignores and pending debounce state.
+    let Ok(files) = list_immediate_files(root) else {
+        return;
+    };
     let mut seen = std::collections::HashSet::new();
     let t = now_ms();
     for path in files {
@@ -295,7 +301,7 @@ mod tests {
             .unwrap()
             .write_all(b"x")
             .unwrap();
-        let files = list_immediate_files(&dir);
+        let files = list_immediate_files(&dir).expect("list ok");
         assert_eq!(files.len(), 2);
         assert!(detect_media_kind(&dir.join("a.png")).is_some());
         assert!(detect_media_kind(&dir.join("readme.txt")).is_none());

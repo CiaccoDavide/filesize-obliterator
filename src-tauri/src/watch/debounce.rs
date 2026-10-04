@@ -112,10 +112,12 @@ pub fn is_watchable_file(watch_root: &Path, path: &Path) -> bool {
 }
 
 /// List immediate supported files under `watch_root` (skips `_compressed`).
-pub fn list_immediate_files(watch_root: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(watch_root) else {
-        return Vec::new();
-    };
+///
+/// Returns `Err` when the directory cannot be read so callers can distinguish
+/// a transient listing failure from a truly empty folder (and avoid clearing
+/// ignore/pending state via `retain_only` on `[]`).
+pub fn list_immediate_files(watch_root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let entries = std::fs::read_dir(watch_root)?;
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
@@ -123,7 +125,7 @@ pub fn list_immediate_files(watch_root: &Path) -> Vec<PathBuf> {
             out.push(path);
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -221,12 +223,32 @@ mod tests {
         fs::File::create(nested.join("deep.jpg")).unwrap();
         fs::File::create(compressed.join("out.webp")).unwrap();
 
-        let listed = list_immediate_files(&dir);
+        let listed = list_immediate_files(&dir).expect("list ok");
         let names: Vec<_> = listed
             .iter()
             .filter_map(|p| p.file_name().and_then(|s| s.to_str()))
             .collect();
         assert_eq!(names, vec!["keep.png"]);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_immediate_files_errors_on_missing_directory() {
+        let parent = temp_dir("missing-parent");
+        let missing = parent.join("no-such-dir");
+        let err = list_immediate_files(&missing).expect_err("missing dir");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn retain_only_on_empty_seen_clears_ignored_existing() {
+        // Documents why poll_once must skip retain_only when listing fails:
+        // a transient read_dir error must not look like "directory is empty".
+        let mut t = SizeStableTracker::new(Duration::from_millis(100));
+        t.ignore_existing(vec!["/old.jpg".into()]);
+        t.retain_only(&HashSet::new());
+        assert_eq!(t.observe("/old.jpg".into(), 4, 0), None);
+        assert_eq!(t.observe("/old.jpg".into(), 4, 100), Some("/old.jpg".into()));
     }
 }

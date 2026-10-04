@@ -22,8 +22,15 @@ describe("createBatchAdmissionController", () => {
     const gate = createBatchAdmissionController();
     const token = gate.begin();
     expect(gate.isCurrent(token)).toBe(true);
+    expect(gate.current()).toBe(token);
     gate.abort();
     expect(gate.isCurrent(token)).toBe(false);
+    expect(gate.current()).toBe(token + 1);
+  });
+
+  it("exposes current() as 0 before the first begin()", () => {
+    const gate = createBatchAdmissionController();
+    expect(gate.current()).toBe(0);
   });
 
   it("lets a new begin() after abort() proceed independently", () => {
