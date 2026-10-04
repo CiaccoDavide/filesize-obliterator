@@ -1,4 +1,5 @@
 import type { CompressEvent, JobInfo, JobStatus } from "../ipc/compress";
+import { normalizeOpsError } from "./batchSummary";
 
 /** Operational phase shown on the live HUD strip. */
 export type OpsPhase =
@@ -6,6 +7,7 @@ export type OpsPhase =
   | "COMPRESSING"
   | "COMPLETE"
   | "FAILED"
+  | "PARTIAL"
   | "ABORTING";
 
 /** Per-file row tracked from job IPC + event stream. */
@@ -31,6 +33,7 @@ const PHASE_RANK: Record<OpsPhase, number> = {
   ABORTING: 2,
   COMPLETE: 3,
   FAILED: 3,
+  PARTIAL: 3,
 };
 
 export function jobStatusToPhase(status: JobStatus): OpsPhase {
@@ -53,19 +56,21 @@ export function jobStatusToPhase(status: JobStatus): OpsPhase {
 }
 
 function rowFromJobInfo(job: JobInfo): ProgressRow {
+  const phase = jobStatusToPhase(job.status);
+  const failed = phase === "FAILED";
   return {
     jobId: job.id,
     sourcePath: job.sourcePath,
     mediaKind: job.mediaKind,
     presetId: job.presetId,
-    phase: jobStatusToPhase(job.status),
+    phase,
     percent: job.percent,
     bytesTotal: job.originalBytes,
     originalBytes: job.originalBytes,
     resultBytes: job.resultBytes,
-    outputPath: job.outputPath,
+    outputPath: failed ? undefined : job.outputPath,
     durationMs: job.durationMs,
-    error: job.error,
+    error: job.error ? normalizeOpsError(job.error) : job.error,
   };
 }
 
@@ -132,6 +137,7 @@ export function markFailed(
   jobId: string,
   error: string,
 ): ProgressRow[] {
+  const terse = normalizeOpsError(error);
   const idx = rows.findIndex((r) => r.jobId === jobId);
   if (idx === -1) {
     return [
@@ -139,12 +145,18 @@ export function markFailed(
       {
         ...placeholderRow(jobId),
         phase: "FAILED",
-        error,
+        error: terse,
+        outputPath: undefined,
       },
     ];
   }
   const copy = rows.slice();
-  copy[idx] = { ...rows[idx], phase: "FAILED", error };
+  copy[idx] = {
+    ...rows[idx],
+    phase: "FAILED",
+    error: terse,
+    outputPath: undefined,
+  };
   return copy;
 }
 
@@ -253,7 +265,9 @@ export function applyCompressEvent(
       copy[idx] = {
         ...row,
         phase: "FAILED",
-        error: event.error,
+        error: normalizeOpsError(event.error),
+        // Incomplete / reserved outputs are never success paths.
+        outputPath: undefined,
       };
       return copy;
     default: {
@@ -269,7 +283,10 @@ export function deriveOpsPhase(rows: ProgressRow[]): OpsPhase {
   if (rows.some((r) => r.phase === "COMPRESSING" || r.phase === "AWAITING")) {
     return "COMPRESSING";
   }
-  if (rows.some((r) => r.phase === "FAILED")) return "FAILED";
+  const hasFail = rows.some((r) => r.phase === "FAILED");
+  const hasOk = rows.some((r) => r.phase === "COMPLETE");
+  if (hasFail && hasOk) return "PARTIAL";
+  if (hasFail) return "FAILED";
   return "COMPLETE";
 }
 

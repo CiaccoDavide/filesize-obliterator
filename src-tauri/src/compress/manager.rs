@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -408,6 +409,60 @@ fn fail_job(manager: &JobManager, app: &AppHandle, job_id: String, error: String
     );
 }
 
+fn job_is_active(manager: &JobManager, job_id: &str) -> bool {
+    manager
+        .with_job(job_id, |record| {
+            Ok(matches!(
+                record.info.status,
+                JobStatus::Queued | JobStatus::Running
+            ))
+        })
+        .unwrap_or(false)
+}
+
+/// Fail only when the job is still queued/running (panic / stall recovery).
+fn fail_job_if_active(manager: &JobManager, app: &AppHandle, job_id: String, error: String) {
+    if job_is_active(manager, &job_id) {
+        fail_job(manager, app, job_id, error);
+    }
+}
+
+/// Temp/partial + reserved final path — removed on drop unless disarmed after promote.
+struct StagingCleanup {
+    partial: PathBuf,
+    reserved: PathBuf,
+    armed: bool,
+}
+
+impl StagingCleanup {
+    fn new(partial: PathBuf, reserved: PathBuf) -> Self {
+        Self {
+            partial,
+            reserved,
+            armed: true,
+        }
+    }
+
+    fn release(&mut self) {
+        let _ = fs::remove_file(&self.partial);
+        let _ = fs::remove_file(&self.reserved);
+        self.armed = false;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagingCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.partial);
+            let _ = fs::remove_file(&self.reserved);
+        }
+    }
+}
+
 fn cancel_job(manager: &JobManager, app: &AppHandle, job_id: String) {
     let error = "cancelled".to_string();
     let _ = manager.mark_failed(&job_id, error.clone());
@@ -531,11 +586,7 @@ fn run_job(
         parent.join(format!("{base}.{job_id}.partial"))
     };
     let _ = fs::write(&partial_path, b"");
-
-    let release_reserved = || {
-        let _ = fs::remove_file(&partial_path);
-        let _ = fs::remove_file(&output_path);
-    };
+    let mut staging = StagingCleanup::new(partial_path.clone(), output_path.clone());
 
     let report_progress = |percent: f64| -> bool {
         if cancel.load(Ordering::SeqCst) || manager.is_cancel_requested(&job_id) {
@@ -558,45 +609,36 @@ fn run_job(
     };
 
     if !report_progress(0.0) {
-        release_reserved();
+        staging.release();
         cancel_job(&manager, &app, job_id);
         return;
     }
 
-    let encode_result = match media_kind {
+    // catch_unwind: encoder/process panic must not leave the job stuck in Running.
+    let encode_result = catch_unwind(AssertUnwindSafe(|| match media_kind {
         MediaKind::Image => {
             if !report_progress(20.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+                return Err("cancelled".to_string());
             }
             let result = encode_image(&source, &preset_id, &partial_path, strip_metadata);
             if result.is_ok() && !report_progress(90.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+                return Err("cancelled".to_string());
             }
             result
         }
         MediaKind::Audio => {
             if !report_progress(20.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+                return Err("cancelled".to_string());
             }
             let result = encode_audio(&source, &preset_id, &partial_path, Some(cancel.as_ref()));
             if result.is_ok() && !report_progress(90.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+                return Err("cancelled".to_string());
             }
             result
         }
         MediaKind::Video => {
             if !report_progress(1.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+                return Err("cancelled".to_string());
             }
             let mut on_progress = |percent: f64| -> bool {
                 // Map encoder 0..=99 into job 1..=95 so finalize can still emit 100.
@@ -612,30 +654,38 @@ fn run_job(
                 strip_metadata,
             );
             if result.is_ok() && !report_progress(96.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+                return Err("cancelled".to_string());
             }
             result
         }
         MediaKind::Pdf => {
             if !report_progress(20.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+                return Err("cancelled".to_string());
             }
             let result = encode_pdf(&source, &preset_id, &partial_path, Some(cancel.as_ref()));
             if result.is_ok() && !report_progress(90.0) {
-                release_reserved();
-                cancel_job(&manager, &app, job_id);
-                return;
+                return Err("cancelled".to_string());
             }
             result
+        }
+    }));
+
+    let encode_result = match encode_result {
+        Ok(inner) => inner,
+        Err(_) => {
+            staging.release();
+            fail_job_if_active(
+                &manager,
+                &app,
+                job_id,
+                "encoder crashed".into(),
+            );
+            return;
         }
     };
 
     if let Err(error) = encode_result {
-        release_reserved();
+        staging.release();
         if error == "cancelled" {
             cancel_job(&manager, &app, job_id);
         } else {
@@ -645,7 +695,7 @@ fn run_job(
     }
 
     if cancel.load(Ordering::SeqCst) || manager.is_cancel_requested(&job_id) {
-        release_reserved();
+        staging.release();
         cancel_job(&manager, &app, job_id);
         return;
     }
@@ -655,7 +705,7 @@ fn run_job(
     let result_bytes = match fs::metadata(&partial_path).map(|m| m.len()) {
         Ok(n) => n,
         Err(e) => {
-            release_reserved();
+            staging.release();
             fail_job(
                 &manager,
                 &app,
@@ -669,7 +719,7 @@ fn run_job(
     if let Err(e) = fs::rename(&partial_path, &output_path) {
         // Fallback copy if rename crosses volumes.
         if let Err(copy_err) = fs::copy(&partial_path, &output_path) {
-            release_reserved();
+            staging.release();
             fail_job(
                 &manager,
                 &app,
@@ -680,6 +730,8 @@ fn run_job(
         }
         let _ = fs::remove_file(&partial_path);
     }
+    // Partial promoted (or copied); reserved path is the final success artifact.
+    staging.disarm();
 
     if !report_progress(100.0) {
         let _ = fs::remove_file(&output_path);
@@ -959,5 +1011,71 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(finished.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn staging_cleanup_removes_incomplete_outputs_on_drop() {
+        let root = std::env::temp_dir().join(format!(
+            "fo-staging-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("root");
+        let partial = root.join("out.webp.job-9.partial");
+        let reserved = root.join("out.webp");
+        fs::write(&partial, b"partial").expect("partial");
+        fs::write(&reserved, b"").expect("reserved");
+
+        {
+            let staging = StagingCleanup::new(partial.clone(), reserved.clone());
+            assert!(staging.armed);
+            // drop armed → both removed
+        }
+        assert!(!partial.exists());
+        assert!(!reserved.exists());
+
+        fs::write(&partial, b"partial").expect("partial2");
+        fs::write(&reserved, b"final").expect("reserved2");
+        {
+            let mut staging = StagingCleanup::new(partial.clone(), reserved.clone());
+            staging.disarm();
+        }
+        assert!(partial.exists());
+        assert_eq!(fs::read(&reserved).expect("read"), b"final");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fail_job_if_active_skips_already_terminal_jobs() {
+        let manager = JobManager::default();
+        let source = temp_source("terminal.bin", b"x");
+        let id = "job-terminal".to_string();
+        {
+            let mut guard = manager.inner.lock().unwrap();
+            guard.jobs.insert(
+                id.clone(),
+                JobRecord {
+                    info: JobInfo {
+                        id: id.clone(),
+                        source_path: source.to_string_lossy().into_owned(),
+                        media_kind: MediaKind::Image,
+                        preset_id: "balanced".into(),
+                        status: JobStatus::Completed,
+                        percent: 100.0,
+                        error: None,
+                        output_path: Some("/tmp/out.webp".into()),
+                        original_bytes: Some(1),
+                        result_bytes: Some(1),
+                        duration_ms: Some(1),
+                    },
+                    cancel: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        }
+        assert!(!job_is_active(&manager, &id));
     }
 }

@@ -129,6 +129,27 @@ describe("applyCompressEvent", () => {
     expect(rows[0].error).toBe("encoder crashed");
   });
 
+  it("normalizes permission errors and clears any output path on failed", () => {
+    const rows = applyCompressEvent(
+      [
+        row({
+          phase: "COMPRESSING",
+          outputPath: "/tmp/_compressed/a.webp",
+        }),
+      ],
+      {
+        type: "failed",
+        jobId: "job-1",
+        error: "cannot read source: Permission denied (os error 13)",
+      },
+    );
+    expect(rows[0]).toMatchObject({
+      phase: "FAILED",
+      error: "permission denied — cannot read source",
+      outputPath: undefined,
+    });
+  });
+
   it("upserts a placeholder when progress arrives before start await", () => {
     const rows = applyCompressEvent([], {
       type: "progress",
@@ -222,6 +243,15 @@ describe("markAborting + deriveOpsPhase", () => {
 
   it("derives COMPLETE when all rows complete", () => {
     expect(deriveOpsPhase([row({ phase: "COMPLETE" })])).toBe("COMPLETE");
+  });
+
+  it("derives PARTIAL when some succeed and some fail", () => {
+    expect(
+      deriveOpsPhase([
+        row({ phase: "COMPLETE" }),
+        row({ jobId: "job-2", phase: "FAILED", error: "encoder crashed" }),
+      ]),
+    ).toBe("PARTIAL");
   });
 
   it("derives AWAITING with no rows", () => {

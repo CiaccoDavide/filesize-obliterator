@@ -4,6 +4,15 @@ import {
   runSequentialAdmit,
 } from "../compress/batchAdmission";
 import {
+  buildBatchSummary,
+  dismissFailedRows,
+  ENCODER_STALL_MS,
+  failedRowsForRetry,
+  normalizeOpsError,
+  rowsAfterStallTimeout,
+  type BatchSummary,
+} from "../compress/batchSummary";
+import {
   abortSurfaceErrorFromCancelResults,
   activeJobIds,
   applyCancelResults,
@@ -17,6 +26,7 @@ import {
   compressCancel,
   compressStart,
   listenCompressEvents,
+  type MediaKind,
 } from "../ipc/compress";
 import type { StagedFile } from "../intake/types";
 
@@ -32,8 +42,26 @@ function cancelableActiveIds(rows: ProgressRow[]): string[] {
 }
 
 function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return normalizeOpsError(err instanceof Error ? err.message : String(err));
 }
+
+function asMediaKind(kind: string): MediaKind | null {
+  if (
+    kind === "image" ||
+    kind === "audio" ||
+    kind === "video" ||
+    kind === "pdf"
+  ) {
+    return kind;
+  }
+  return null;
+}
+
+type AdmitTarget = {
+  path: string;
+  kind: MediaKind;
+  presetId: string;
+};
 
 export function useCompressProgress() {
   const [rows, setRows] = useState<ProgressRow[]>([]);
@@ -42,6 +70,14 @@ export function useCompressProgress() {
   const admissionRef = useRef(createBatchAdmissionController());
   /** Jobs admitted by the current startStaged; abortAll always cancels these. */
   const admittedIdsRef = useRef<Set<string>>(new Set());
+  const lastActivityRef = useRef<Map<string, number>>(new Map());
+  const lastOptionsRef = useRef<StartStagedOptions>({});
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+
+  const touchActivity = useCallback((jobId: string) => {
+    lastActivityRef.current.set(jobId, Date.now());
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,6 +87,7 @@ export function useCompressProgress() {
       try {
         unlisten = await listenCompressEvents((event) => {
           if (cancelled) return;
+          touchActivity(event.jobId);
           setRows((prev) => applyCompressEvent(prev, event));
         });
       } catch {
@@ -63,9 +100,28 @@ export function useCompressProgress() {
       cancelled = true;
       unlisten?.();
     };
+  }, [touchActivity]);
+
+  // Stall watchdog — never leave COMPRESSING after encoder/process silence.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setRows((prev) =>
+        rowsAfterStallTimeout(
+          prev,
+          lastActivityRef.current,
+          Date.now(),
+          ENCODER_STALL_MS,
+        ),
+      );
+    }, 2_000);
+    return () => window.clearInterval(timer);
   }, []);
 
   const phase = useMemo(() => deriveOpsPhase(rows), [rows]);
+  const batchSummary: BatchSummary | null = useMemo(
+    () => buildBatchSummary(rows),
+    [rows],
+  );
   const canAbort = useMemo(
     () =>
       rows.some(
@@ -77,30 +133,39 @@ export function useCompressProgress() {
     [rows, starting],
   );
   const aborting = phase === "ABORTING";
+  const canRetryFailed = useMemo(
+    () => failedRowsForRetry(rows).length > 0 && !canAbort && !starting,
+    [rows, canAbort, starting],
+  );
+  const canDismissFailed = useMemo(
+    () => rows.some((r) => r.phase === "FAILED") && !canAbort && !starting,
+    [rows, canAbort, starting],
+  );
 
-  const startStaged = useCallback(
-    async (files: StagedFile[], options?: StartStagedOptions) => {
-      const ready = files.filter((f) => f.presetId);
-      if (ready.length === 0) {
+  const admitTargets = useCallback(
+    async (targets: AdmitTarget[], options?: StartStagedOptions) => {
+      if (targets.length === 0) {
         setError("NO PRESET — select an alternative");
         return;
       }
+      lastOptionsRef.current = options ?? lastOptionsRef.current;
       const token = admissionRef.current.begin();
       admittedIdsRef.current = new Set();
       setStarting(true);
       setError(null);
       try {
-        await runSequentialAdmit(ready, {
+        await runSequentialAdmit(targets, {
           isCurrent: () => admissionRef.current.isCurrent(token),
           start: (file) =>
             compressStart({
               sourcePath: file.path,
               mediaKind: file.kind,
               presetId: file.presetId,
-              stripMetadata: options?.stripMetadata,
+              stripMetadata: lastOptionsRef.current.stripMetadata,
             }),
           onAdmitted: (job) => {
             admittedIdsRef.current.add(job.id);
+            touchActivity(job.id);
             setRows((prev) => upsertJob(prev, job));
           },
           onLateAdmit: (job) => {
@@ -114,10 +179,10 @@ export function useCompressProgress() {
             setRows((prev) => [
               ...prev,
               {
-                jobId: `admit-failed:${file.path}`,
+                jobId: `admit-failed:${file.path}:${Date.now()}`,
                 sourcePath: file.path,
                 mediaKind: file.kind,
-                presetId: file.presetId ?? "",
+                presetId: file.presetId,
                 phase: "FAILED",
                 percent: 0,
                 error: message,
@@ -131,8 +196,48 @@ export function useCompressProgress() {
         setStarting(false);
       }
     },
-    [],
+    [touchActivity],
   );
+
+  const startStaged = useCallback(
+    async (files: StagedFile[], options?: StartStagedOptions) => {
+      const ready = files
+        .filter((f) => f.presetId)
+        .map((f) => ({
+          path: f.path,
+          kind: f.kind,
+          presetId: f.presetId,
+        }));
+      await admitTargets(ready, options);
+    },
+    [admitTargets],
+  );
+
+  const retryFailed = useCallback(async () => {
+    const candidates = failedRowsForRetry(rowsRef.current);
+    const targets: AdmitTarget[] = [];
+    for (const c of candidates) {
+      const kind = asMediaKind(c.mediaKind);
+      if (!kind || !c.presetId) continue;
+      targets.push({
+        path: c.sourcePath,
+        kind,
+        presetId: c.presetId,
+      });
+    }
+    if (targets.length === 0) {
+      setError("RETRY FAILED — no retryable items");
+      return;
+    }
+    // Drop failed rows first so successes stay and new job ids replace failures.
+    setRows((prev) => dismissFailedRows(prev));
+    await admitTargets(targets, lastOptionsRef.current);
+  }, [admitTargets]);
+
+  const dismissFailed = useCallback(() => {
+    setRows((prev) => dismissFailedRows(prev));
+    setError(null);
+  }, []);
 
   const abortAll = useCallback(async () => {
     // Invalidate any in-flight startStaged so it stops admitting further files.
@@ -160,11 +265,11 @@ export function useCompressProgress() {
       surfaceError = abortSurfaceErrorFromCancelResults(prev, ids, results);
       return applyCancelResults(prev, ids, results);
     });
-    if (surfaceError) setError(surfaceError);
+    if (surfaceError) setError(normalizeOpsError(surfaceError));
   }, []);
 
   const cancelOne = useCallback(async (jobId: string) => {
-    const row = rows.find((r) => r.jobId === jobId);
+    const row = rowsRef.current.find((r) => r.jobId === jobId);
     if (
       !row ||
       row.phase === "COMPLETE" ||
@@ -181,26 +286,29 @@ export function useCompressProgress() {
       surfaceError = abortSurfaceErrorFromCancelResults(prev, [jobId], results);
       return applyCancelResults(prev, [jobId], results);
     });
-    if (surfaceError) setError(surfaceError);
-  }, [rows]);
+    if (surfaceError) setError(normalizeOpsError(surfaceError));
+  }, []);
 
   /** Clears finished HUD rows only — never deletes on-disk `_compressed` outputs. */
   const clearFinished = useCallback(() => {
     setRows((prev) =>
-      prev.filter(
-        (r) => r.phase !== "COMPLETE" && r.phase !== "FAILED",
-      ),
+      prev.filter((r) => r.phase !== "COMPLETE" && r.phase !== "FAILED"),
     );
   }, []);
 
   return {
     rows,
     phase,
+    batchSummary,
     error,
     starting,
     canAbort,
     aborting,
+    canRetryFailed,
+    canDismissFailed,
     startStaged,
+    retryFailed,
+    dismissFailed,
     abortAll,
     cancelOne,
     clearFinished,
