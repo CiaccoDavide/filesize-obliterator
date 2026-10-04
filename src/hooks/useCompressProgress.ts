@@ -4,7 +4,6 @@ import {
   runSequentialAdmit,
 } from "../compress/batchAdmission";
 import {
-  abortingPastCleanupTimeout,
   buildBatchSummary,
   dismissFailedRows,
   ENCODER_STALL_ERROR,
@@ -81,8 +80,6 @@ export function useCompressProgress() {
   const stallCancelInFlightRef = useRef<Set<string>>(new Set());
   /** Jobs cancelled by the stall watchdog — remap Failed{"cancelled"} to stall reason. */
   const stallLabeledIdsRef = useRef<Set<string>>(new Set());
-  /** When each job entered ABORTING — force-fail if Failed never arrives. */
-  const abortStartedRef = useRef<Map<string, number>>(new Map());
   /** Tombstones for DISMISS/RETRY/admit/clearFinished — ignore late events. */
   const dismissedJobIdsRef = useRef<Set<string>>(new Set());
   const lastOptionsRef = useRef<StartStagedOptions>({});
@@ -91,19 +88,6 @@ export function useCompressProgress() {
 
   const touchActivity = useCallback((jobId: string) => {
     lastActivityRef.current.set(jobId, Date.now());
-  }, []);
-
-  const noteAbortStarted = useCallback((ids: string[]) => {
-    const now = Date.now();
-    for (const id of ids) {
-      if (!abortStartedRef.current.has(id)) {
-        abortStartedRef.current.set(id, now);
-      }
-    }
-  }, []);
-
-  const clearAbortStarted = useCallback((jobId: string) => {
-    abortStartedRef.current.delete(jobId);
   }, []);
 
   const tombstoneFailedIds = useCallback((rows: ProgressRow[]) => {
@@ -146,21 +130,7 @@ export function useCompressProgress() {
                 ev = { ...ev, error: ENCODER_STALL_ERROR };
               }
             }
-            const next = applyCompressEvent(
-              prev,
-              ev,
-              dismissedJobIdsRef.current,
-            );
-            const row = next.find((r) => r.jobId === ev.jobId);
-            if (
-              row &&
-              (row.phase === "FAILED" ||
-                row.phase === "COMPLETE" ||
-                row.phase === "SKIPPED")
-            ) {
-              clearAbortStarted(ev.jobId);
-            }
-            return next;
+            return applyCompressEvent(prev, ev, dismissedJobIdsRef.current);
           });
         });
       } catch {
@@ -173,37 +143,14 @@ export function useCompressProgress() {
       cancelled = true;
       unlisten?.();
     };
-  }, [touchActivity, clearAbortStarted]);
+  }, [touchActivity]);
 
   // Stall watchdog — cancel silent encodes so reserved paths/.partial clean up.
-  // Keep ABORTING until Failed (after StagingCleanup) so RETRY stays off; if Failed
-  // never arrives, force-fail after cancel cleanup timeout with cleanupPending so
-  // RETRY stays gated until a real Failed event.
+  // Keep ABORTING until backend Failed (after StagingCleanup) so RETRY stays
+  // gated; never UI-timeout force-fail while cleanup may still be in flight.
   useEffect(() => {
     const timer = window.setInterval(() => {
       const now = Date.now();
-
-      const stuckAborting = abortingPastCleanupTimeout(
-        rowsRef.current,
-        abortStartedRef.current,
-        now,
-      );
-      if (stuckAborting.length > 0) {
-        setRows((prev) => {
-          let next = prev;
-          for (const id of stuckAborting) {
-            const row = next.find((r) => r.jobId === id);
-            if (row?.phase !== "ABORTING") continue;
-            const err = stallLabeledIdsRef.current.has(id)
-              ? ENCODER_STALL_ERROR
-              : "cancelled";
-            stallLabeledIdsRef.current.delete(id);
-            clearAbortStarted(id);
-            next = markFailed(next, id, err, { cleanupPending: true });
-          }
-          return next;
-        });
-      }
 
       const stalled = stalledJobIds(
         rowsRef.current,
@@ -221,7 +168,6 @@ export function useCompressProgress() {
         const row = rowsRef.current.find((r) => r.jobId === id);
         if (row) phasesAtCancel.set(id, row.phase);
       }
-      noteAbortStarted(stalled);
       setRows((prev) => markAborting(prev, stalled));
 
       void (async () => {
@@ -244,7 +190,6 @@ export function useCompressProgress() {
               stallLabeledIdsRef.current.delete(id);
               const row = next.find((r) => r.jobId === id);
               if (row?.phase === "FAILED") {
-                clearAbortStarted(id);
                 next = markFailed(next, id, ENCODER_STALL_ERROR);
               }
             }
@@ -256,7 +201,7 @@ export function useCompressProgress() {
       })();
     }, 2_000);
     return () => window.clearInterval(timer);
-  }, [noteAbortStarted, clearAbortStarted]);
+  }, []);
 
   const phase = useMemo(() => deriveOpsPhase(rows), [rows]);
   const batchSummary: BatchSummary | null = useMemo(
@@ -427,7 +372,6 @@ export function useCompressProgress() {
       }
     }
     if (ids.length === 0) return;
-    noteAbortStarted(ids);
 
     setError(null);
     const results = await Promise.allSettled(
@@ -436,22 +380,10 @@ export function useCompressProgress() {
     let surfaceError: string | null = null;
     setRows((prev) => {
       surfaceError = abortSurfaceErrorFromCancelResults(prev, ids, results);
-      const next = applyCancelResults(prev, ids, results, phasesAtCancel);
-      for (const id of ids) {
-        const row = next.find((r) => r.jobId === id);
-        if (
-          row &&
-          (row.phase === "FAILED" ||
-            row.phase === "COMPLETE" ||
-            row.phase === "SKIPPED")
-        ) {
-          clearAbortStarted(id);
-        }
-      }
-      return next;
+      return applyCancelResults(prev, ids, results, phasesAtCancel);
     });
     if (surfaceError) setError(normalizeOpsError(surfaceError));
-  }, [noteAbortStarted, clearAbortStarted]);
+  }, []);
 
   const cancelOne = useCallback(async (jobId: string) => {
     const row = rowsRef.current.find((r) => r.jobId === jobId);
@@ -465,27 +397,16 @@ export function useCompressProgress() {
       return;
     }
     const phasesAtCancel = new Map<string, OpsPhase>([[jobId, row.phase]]);
-    noteAbortStarted([jobId]);
     setRows((prev) => markAborting(prev, [jobId]));
     setError(null);
     const results = await Promise.allSettled([compressCancel(jobId)]);
     let surfaceError: string | null = null;
     setRows((prev) => {
       surfaceError = abortSurfaceErrorFromCancelResults(prev, [jobId], results);
-      const next = applyCancelResults(prev, [jobId], results, phasesAtCancel);
-      const after = next.find((r) => r.jobId === jobId);
-      if (
-        after &&
-        (after.phase === "FAILED" ||
-          after.phase === "COMPLETE" ||
-          after.phase === "SKIPPED")
-      ) {
-        clearAbortStarted(jobId);
-      }
-      return next;
+      return applyCancelResults(prev, [jobId], results, phasesAtCancel);
     });
     if (surfaceError) setError(normalizeOpsError(surfaceError));
-  }, [noteAbortStarted, clearAbortStarted]);
+  }, []);
 
   /** Clears finished HUD rows only — never deletes on-disk `_compressed` outputs. */
   const clearFinished = useCallback(() => {

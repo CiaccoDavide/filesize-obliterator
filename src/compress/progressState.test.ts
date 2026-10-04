@@ -797,6 +797,21 @@ describe("dismissed / tombstoned job ids", () => {
     expect(rows).toEqual(before);
   });
 
+  it("ignores Failed for unknown/non-admitted job ids (no ghost placeholder)", () => {
+    // After DISMISS/RETRY removes a row, a late Failed must not insert
+    // sourcePath "—" via the missing-row path — even without a tombstone.
+    const before: ProgressRow[] = [
+      row({ jobId: "kept", phase: "COMPLETE", sourcePath: "/tmp/ok.png" }),
+    ];
+    const rows = applyCompressEvent(before, {
+      type: "failed",
+      jobId: "dismissed-old",
+      error: "cancelled",
+    });
+    expect(rows).toEqual(before);
+    expect(rows.some((r) => r.sourcePath === "—")).toBe(false);
+  });
+
   it("still upserts early progress placeholders for non-tombstoned ids", () => {
     const rows = applyCompressEvent([], {
       type: "progress",
@@ -821,38 +836,33 @@ describe("markFailed", () => {
     expect(markFailed(before, "missing", "cancelled")).toEqual(before);
   });
 
-  it("marks an existing row FAILED and can set cleanupPending", () => {
+  it("marks an existing ABORTING row FAILED", () => {
     const rows = markFailed(
       [row({ phase: "ABORTING", percent: 40 })],
       "job-1",
       "cancelled",
-      { cleanupPending: true },
     );
     expect(rows[0]).toMatchObject({
       phase: "FAILED",
       error: "cancelled",
-      cleanupPending: true,
       outputPath: undefined,
     });
   });
 });
 
-describe("cleanupPending", () => {
-  it("clears cleanupPending when a real Failed event arrives", () => {
-    const rows = applyCompressEvent(
-      [
-        row({
-          phase: "FAILED",
-          error: "cancelled",
-          cleanupPending: true,
-        }),
-      ],
-      { type: "failed", jobId: "job-1", error: "cancelled" },
-    );
-    expect(rows[0]).toMatchObject({
+describe("ABORTING until backend Failed", () => {
+  it("keeps ABORTING so RETRY stays gated until Failed arrives", () => {
+    const aborting = [row({ phase: "ABORTING", percent: 40 })];
+    expect(deriveOpsPhase(aborting)).toBe("ABORTING");
+    const terminal = applyCompressEvent(aborting, {
+      type: "failed",
+      jobId: "job-1",
+      error: "cancelled",
+    });
+    expect(terminal[0]).toMatchObject({
       phase: "FAILED",
       error: "cancelled",
-      cleanupPending: undefined,
     });
+    expect(deriveOpsPhase(terminal)).toBe("FAILED");
   });
 });
