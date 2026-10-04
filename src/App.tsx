@@ -39,21 +39,46 @@ function App() {
   }, []);
 
   return (
-    <main className="container">
-      <h1>Filesize Obliterator</h1>
-      <p className="tagline">Local media compression desktop shell</p>
-      {error ? (
-        <p className="status error" role="alert">
-          Backend unavailable: {error}
-        </p>
-      ) : info && pingResult ? (
-        <p className="status">
-          Rust bridge ok — {info.name} v{info.version} ({pingResult})
-        </p>
-      ) : (
-        <p className="status">Connecting to Rust backend…</p>
-      )}
-    </main>
+    <div className="app-shell">
+      <div className="grid-bg" aria-hidden="true" />
+      <main className="app-main">
+        <section className="setup">
+          <header className="hud-frame setup-header">
+            <p className="brand-mark">Filesize Obliterator</p>
+            <h1 className="brand-tagline">Local media compression.</h1>
+            <p className="brand-sub">
+              Instrument panel for shrinking files on this machine. No cloud.
+            </p>
+          </header>
+
+          <div className="hud-frame setup-surface">
+            <p className="panel-label">Work surface</p>
+            <p className="surface-await">AWAITING INPUT</p>
+
+            {error ? (
+              <p className="bridge-status error" role="alert">
+                <span className="hud-tick" aria-hidden="true" />
+                Backend unavailable
+                <span className="mono">— {error}</span>
+              </p>
+            ) : info && pingResult ? (
+              <p className="bridge-status">
+                <span className="hud-tick" aria-hidden="true" />
+                Bridge ok
+                <span className="mono">
+                  — {info.name} v{info.version} ({pingResult})
+                </span>
+              </p>
+            ) : (
+              <p className="bridge-status">
+                <span className="hud-tick" aria-hidden="true" />
+                Connecting
+              </p>
+            )}
+          </div>
+        </section>
+      </main>
+    </div>
   );
 }
 
