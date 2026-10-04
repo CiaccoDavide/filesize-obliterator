@@ -54,7 +54,7 @@
   gap: 0.75rem;
 }
 
-/* Ops strip: privacy + force + presets + estimate — glanceable armed path */
+/* Ops strip: privacy + force + presets + estimate + start — glanceable armed path */
 .ops-strip {
   padding: 0.85rem 1rem;
   display: flex;
@@ -70,6 +70,13 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.75rem 1.25rem;
+}
+
+.ops-start {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
 }
 
 .ops-strip .preset-panel,

@@ -26,7 +26,11 @@ import { revealInFileManager } from "./ipc/reveal";
 import { useKeyboardShortcuts } from "./keyboard/useKeyboardShortcuts";
 import type { RevealAction } from "./reveal/actions";
 import { kindsPresent } from "./presets/selection";
-import { deriveShellMode } from "./shell/mode";
+import {
+  deriveShellMode,
+  shellShowsOps,
+  shellShowsProgress,
+} from "./shell/mode";
 import "./App.css";
 
 type AppInfo = {
@@ -249,10 +253,12 @@ function App() {
       ? "density-regular"
       : "density-compact";
 
-  const showOps =
-    shellMode === "armed" || shellMode === "running" || shellMode === "done";
-  const showProgress = shellMode !== "idle";
-  const progressFirst = shellMode === "running" || shellMode === "done";
+  const showOps = shellShowsOps(shellMode);
+  const showProgress = shellShowsProgress(shellMode);
+  const progressFirst = showProgress;
+
+  const startDisabled =
+    compress.starting || staged.length === 0 || compress.canAbort;
 
   const progressPanel = showProgress ? (
     <CompressProgressPanel
@@ -260,21 +266,10 @@ function App() {
       phase={compress.phase}
       batchSummary={compress.batchSummary}
       error={compress.error}
-      starting={compress.starting}
       canAbort={compress.canAbort}
       aborting={compress.aborting}
       canRetryFailed={compress.canRetryFailed}
       canDismissFailed={compress.canDismissFailed}
-      stagedCount={staged.length}
-      estimating={estimate.estimating}
-      onPreview={() => void estimate.previewStaged(staged)}
-      onStart={() =>
-        void compress.startStaged(staged, {
-          stripMetadata: local.settings.stripMetadata,
-          preferHardware: local.settings.preferHardware,
-          force: forceReencode,
-        })
-      }
       onAbort={() => void compress.abortAll()}
       onCancelOne={(jobId) => void compress.cancelOne(jobId)}
       onClearFinished={compress.clearFinished}
@@ -330,6 +325,33 @@ function App() {
         onSelect={handlePresetSelect}
         disabled={!presets.loaded}
       />
+
+      <div className="ops-start" data-testid="ops-start">
+        <button
+          type="button"
+          className="btn"
+          disabled={
+            estimate.estimating || startDisabled
+          }
+          onClick={() => void estimate.previewStaged(staged)}
+        >
+          {estimate.estimating ? "ESTIMATING" : "PREVIEW"}
+        </button>
+        <button
+          type="button"
+          className="btn primary"
+          disabled={startDisabled}
+          onClick={() =>
+            void compress.startStaged(staged, {
+              stripMetadata: local.settings.stripMetadata,
+              preferHardware: local.settings.preferHardware,
+              force: forceReencode,
+            })
+          }
+        >
+          {compress.starting ? "STARTING" : "COMPRESS"}
+        </button>
+      </div>
 
       {presets.error ? (
         <p className="compress-status tone-danger" role="alert">

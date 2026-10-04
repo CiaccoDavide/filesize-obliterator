@@ -24,3 +24,16 @@ export function deriveShellMode(input: {
   }
   return input.stagedCount > 0 ? "armed" : "idle";
 }
+
+/** Ops strip (presets + privacy + start) — armed and after. */
+export function shellShowsOps(mode: ShellMode): boolean {
+  return mode === "armed" || mode === "running" || mode === "done";
+}
+
+/**
+ * Full progress surface (session meters, rows, abort).
+ * Armed keeps start in the ops strip — no separate progress card.
+ */
+export function shellShowsProgress(mode: ShellMode): boolean {
+  return mode === "running" || mode === "done";
+}
