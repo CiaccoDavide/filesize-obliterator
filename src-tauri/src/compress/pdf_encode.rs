@@ -401,7 +401,8 @@ startxref\n\
         let jpeg_a = dir.join("heavy-a.jpg");
         let jpeg_b = dir.join("heavy-b.jpg");
         assert!(
-            write_plasma_jpeg(&gs, &jpeg_a, W, H) && write_plasma_jpeg(&gs, &jpeg_b, W, H),
+            write_plasma_jpeg(&gs, &jpeg_a, W, H, 0)
+                && write_plasma_jpeg(&gs, &jpeg_b, W, H, 1),
             "could not create JPEG fixtures via ghostscript"
         );
         assert!(
@@ -439,7 +440,7 @@ startxref\n\
         out
     }
 
-    fn write_plasma_jpeg(gs: &Path, path: &Path, w: u32, h: u32) -> bool {
+    fn write_plasma_jpeg(gs: &Path, path: &Path, w: u32, h: u32, variant: u32) -> bool {
         if Command::new("magick")
             .args([
                 "-size",
@@ -454,6 +455,17 @@ startxref\n\
         {
             return true;
         }
+        // Distinct color formulas so pdfwrite cannot dedupe identical page streams.
+        // rectfill needs x y width height (4 operands); moveto+2-op form stack-underflows.
+        let paint = if variant == 0 {
+            "0 1 40 { /i exch def 0 1 30 { /j exch def \
+               i 255 div j 255 div 0.5 setrgbcolor \
+               i 20 mul j 20 mul 22 22 rectfill } for } for showpage"
+        } else {
+            "0 1 40 { /i exch def 0 1 30 { /j exch def \
+               j 255 div 0.3 i 255 div setrgbcolor \
+               i 20 mul j 20 mul 22 22 rectfill } for } for showpage"
+        };
         // Rasterize noisy fills to a real JPEG (bitmap), never leave as PDF vectors.
         Command::new(gs)
             .args([
@@ -467,10 +479,7 @@ startxref\n\
                 &format!("-g{w}x{h}"),
                 &format!("-sOutputFile={}", path.display()),
                 "-c",
-                "0 1 40 { /i exch def 0 1 30 { /j exch def \
-                   i 20 mul j 20 mul moveto \
-                   i 255 div j 255 div 0.5 setrgbcolor \
-                   22 22 rectfill } for } for showpage",
+                paint,
             ])
             .status()
             .map(|s| s.success() && path.is_file())
@@ -485,29 +494,35 @@ startxref\n\
         h: u32,
     ) -> bool {
         let mut ps = String::new();
+        let mut args: Vec<String> = vec![
+            "-q".into(),
+            "-dNOPAUSE".into(),
+            "-dBATCH".into(),
+            "-dSAFER".into(),
+            "-sDEVICE=pdfwrite".into(),
+            "-dCompatibilityLevel=1.4".into(),
+            format!("-sOutputFile={}", dest.display()),
+        ];
+        // Place WxH pixels on a (W/4)x(H/4) point page (~288 dpi) so
+        // PDFSETTINGS=/screen (~72 dpi) actually downsamples vs /printer.
+        let page_w = (w / 4).max(1);
+        let page_h = (h / 4).max(1);
         for jpeg in jpegs {
+            let abs = jpeg.canonicalize().unwrap_or_else(|_| jpeg.to_path_buf());
+            // SAFER blocks PostScript `file` unless the path is explicitly permitted.
+            args.push(format!("--permit-file-read={}", abs.display()));
             let lit = ps_path_literal(jpeg);
             ps.push_str(&format!(
-                "<< /PageSize [{w} {h}] >> setpagedevice\n\
-                 {w} {h} scale\n\
+                "<< /PageSize [{page_w} {page_h}] >> setpagedevice\n\
+                 {page_w} {page_h} scale\n\
                  {w} {h} 8 [{w} 0 0 {h} neg 0 {h}]\n\
                  {lit} (r) file /DCTDecode filter false 3 colorimage\n\
                  showpage\n"
             ));
         }
-        let status = Command::new(gs)
-            .args([
-                "-q",
-                "-dNOPAUSE",
-                "-dBATCH",
-                "-dSAFER",
-                "-sDEVICE=pdfwrite",
-                "-dCompatibilityLevel=1.4",
-                &format!("-sOutputFile={}", dest.display()),
-                "-c",
-                &ps,
-            ])
-            .status();
+        args.push("-c".into());
+        args.push(ps);
+        let status = Command::new(gs).args(&args).status();
         status.map(|s| s.success() && dest.is_file()).unwrap_or(false)
     }
 
@@ -542,10 +557,10 @@ startxref\n\
                 &format!("-g{w}x{h}"),
                 &format!("-sOutputFile={}", path.display()),
                 "-c",
+                // rectfill needs x y width height (4 operands).
                 "0 1 40 { /i exch def 0 1 30 { /j exch def \
-                   i 20 mul j 20 mul moveto \
                    i 255 div j 255 div 0.5 setrgbcolor \
-                   22 22 rectfill } for } for showpage",
+                   i 20 mul j 20 mul 22 22 rectfill } for } for showpage",
             ])
             .status()
             .map(|s| s.success() && path.is_file())
