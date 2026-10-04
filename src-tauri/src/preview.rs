@@ -3,6 +3,9 @@
 //! Config ships with an empty assetProtocol.scope. Grants are issued only for
 //! completed image jobs (validated via JobManager) and only for temporary
 //! webview-decodable preview rasters — never arbitrary caller paths.
+//!
+//! Active grants carry a generation token so stale allow/revoke calls (from a
+//! cancelled overlay effect) cannot wipe the currently open overlay's temps.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,16 +21,34 @@ use crate::compress::{prepare_preview_raster, JobManager};
 pub struct PreviewAssets {
     pub source_path: String,
     pub output_path: String,
+    /// Token for this grant; pass to `preview_revoke_assets` so stale revokes no-op.
+    pub grant_generation: u64,
+}
+
+struct ActiveGrant {
+    generation: u64,
+    /// Temporary preview rasters currently in the asset-protocol allow list.
+    preview_paths: Vec<PathBuf>,
+}
+
+struct GrantInner {
+    next_generation: u64,
+    active: Option<ActiveGrant>,
+}
+
+impl Default for GrantInner {
+    fn default() -> Self {
+        Self {
+            next_generation: 1,
+            active: None,
+        }
+    }
 }
 
 #[derive(Default)]
 pub struct PreviewGrantState {
-    inner: Mutex<Option<ActiveGrant>>,
-}
-
-struct ActiveGrant {
-    /// Temporary preview rasters currently in the asset-protocol allow list.
-    preview_paths: Vec<PathBuf>,
+    /// Serializes allow end-to-end (including raster prepare) and revoke.
+    inner: Mutex<GrantInner>,
 }
 
 fn allow_file(app: &AppHandle, path: &Path) -> Result<(), String> {
@@ -40,21 +61,41 @@ fn forbid_file(app: &AppHandle, path: &Path) {
     let _ = app.asset_protocol_scope().forbid_file(path);
 }
 
-fn revoke_active(app: &AppHandle, grants: &PreviewGrantState) {
-    let previous = match grants.inner.lock() {
-        Ok(mut guard) => guard.take(),
-        Err(_) => return,
-    };
-    if let Some(active) = previous {
-        for path in active.preview_paths {
-            forbid_file(app, &path);
-            let _ = fs::remove_file(&path);
+fn cleanup_paths(app: Option<&AppHandle>, paths: &[PathBuf]) {
+    for path in paths {
+        if let Some(app) = app {
+            forbid_file(app, path);
         }
+        let _ = fs::remove_file(path);
     }
+}
+
+/// Take the active grant only when its generation matches `generation`.
+fn take_active_if_generation(inner: &mut GrantInner, generation: u64) -> Option<ActiveGrant> {
+    match &inner.active {
+        Some(active) if active.generation == generation => inner.active.take(),
+        _ => None,
+    }
+}
+
+/// Replace any active grant with a new generation + paths. Returns the previous
+/// grant (if any) so the caller can forbid/delete its temps.
+fn install_grant(inner: &mut GrantInner, preview_paths: Vec<PathBuf>) -> (u64, Option<ActiveGrant>) {
+    let previous = inner.active.take();
+    let generation = inner.next_generation;
+    inner.next_generation = inner.next_generation.wrapping_add(1);
+    inner.active = Some(ActiveGrant {
+        generation,
+        preview_paths,
+    });
+    (generation, previous)
 }
 
 /// Validate a completed image job, rasterize TIFF/HEIC (and copy web-native
 /// formats) to temp previews, then grant asset-protocol access to those temps.
+///
+/// Holds the grant lock across prepare + scope updates so overlapping allows
+/// cannot race tracked temps.
 #[tauri::command]
 pub fn preview_allow_assets(
     app: AppHandle,
@@ -62,8 +103,15 @@ pub fn preview_allow_assets(
     grants: State<'_, PreviewGrantState>,
     job_id: String,
 ) -> Result<PreviewAssets, String> {
-    // Drop any prior overlay grants before issuing a new pair.
-    revoke_active(&app, &grants);
+    let mut guard = grants
+        .inner
+        .lock()
+        .map_err(|_| "preview grant lock poisoned".to_string())?;
+
+    // Drop any prior overlay grants before issuing a new pair (still locked).
+    if let Some(previous) = guard.active.take() {
+        cleanup_paths(Some(&app), &previous.preview_paths);
+    }
 
     let (source, output) = manager.completed_image_preview_paths(job_id.trim())?;
     let source_preview = prepare_preview_raster(&source).map_err(|e| {
@@ -89,28 +137,33 @@ pub fn preview_allow_assets(
         return Err(e);
     }
 
-    let assets = PreviewAssets {
+    let (generation, _) = install_grant(
+        &mut guard,
+        vec![source_preview.clone(), output_preview.clone()],
+    );
+
+    Ok(PreviewAssets {
         source_path: source_preview.to_string_lossy().into_owned(),
         output_path: output_preview.to_string_lossy().into_owned(),
-    };
-
-    let mut guard = grants
-        .inner
-        .lock()
-        .map_err(|_| "preview grant lock poisoned".to_string())?;
-    *guard = Some(ActiveGrant {
-        preview_paths: vec![source_preview, output_preview],
-    });
-    Ok(assets)
+        grant_generation: generation,
+    })
 }
 
-/// Revoke the active preview asset grants (overlay close).
+/// Revoke the active preview asset grants when `grant_generation` still matches.
+/// Stale tokens (cancelled overlay / superseded allow) are ignored.
 #[tauri::command]
 pub fn preview_revoke_assets(
     app: AppHandle,
     grants: State<'_, PreviewGrantState>,
+    grant_generation: u64,
 ) -> Result<(), String> {
-    revoke_active(&app, &grants);
+    let mut guard = grants
+        .inner
+        .lock()
+        .map_err(|_| "preview grant lock poisoned".to_string())?;
+    if let Some(previous) = take_active_if_generation(&mut guard, grant_generation) {
+        cleanup_paths(Some(&app), &previous.preview_paths);
+    }
     Ok(())
 }
 
@@ -146,26 +199,72 @@ mod tests {
     }
 
     #[test]
-    fn revoke_clears_tracked_temp_files() {
+    fn matching_generation_revoke_clears_tracked_temp_files() {
         let path = temp_file("granted.png", b"png");
         assert!(path.is_file());
-        let state = PreviewGrantState::default();
-        {
-            let mut guard = state.inner.lock().unwrap();
-            *guard = Some(ActiveGrant {
-                preview_paths: vec![path.clone()],
-            });
-        }
-        // Without an AppHandle we only exercise the file-cleanup half via take+.
-        let previous = state.inner.lock().unwrap().take();
-        if let Some(active) = previous {
-            for p in active.preview_paths {
-                let _ = fs::remove_file(&p);
-            }
-        }
+        let mut inner = GrantInner::default();
+        let (generation, previous) = install_grant(&mut inner, vec![path.clone()]);
+        assert!(previous.is_none());
+        assert_eq!(generation, 1);
+
+        let taken = take_active_if_generation(&mut inner, generation).expect("active");
+        cleanup_paths(None, &taken.preview_paths);
+        assert!(inner.active.is_none());
         assert!(!path.is_file());
         if let Some(parent) = path.parent() {
             let _ = fs::remove_dir(parent);
+        }
+    }
+
+    #[test]
+    fn stale_generation_revoke_leaves_active_grant() {
+        let path = temp_file("still-granted.png", b"png");
+        let mut inner = GrantInner::default();
+        let (generation, _) = install_grant(&mut inner, vec![path.clone()]);
+
+        assert!(take_active_if_generation(&mut inner, generation.wrapping_sub(1)).is_none());
+        assert!(take_active_if_generation(&mut inner, generation + 99).is_none());
+        assert!(inner.active.is_some());
+        assert!(path.is_file());
+
+        let taken = take_active_if_generation(&mut inner, generation).expect("active");
+        cleanup_paths(None, &taken.preview_paths);
+        if let Some(parent) = path.parent() {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+
+    #[test]
+    fn install_grant_replaces_previous_and_bumps_generation() {
+        let first = temp_file("first.png", b"a");
+        let second = temp_file("second.png", b"b");
+        let mut inner = GrantInner::default();
+
+        let (gen1, prev1) = install_grant(&mut inner, vec![first.clone()]);
+        assert!(prev1.is_none());
+        assert_eq!(gen1, 1);
+
+        let (gen2, prev2) = install_grant(&mut inner, vec![second.clone()]);
+        assert_eq!(gen2, 2);
+        let prev2 = prev2.expect("replaced");
+        assert_eq!(prev2.generation, gen1);
+        assert_eq!(prev2.preview_paths, vec![first.clone()]);
+        assert_eq!(
+            inner.active.as_ref().map(|a| a.generation),
+            Some(gen2)
+        );
+
+        // Stale revoke for gen1 must not clear gen2.
+        assert!(take_active_if_generation(&mut inner, gen1).is_none());
+        assert!(inner.active.is_some());
+
+        cleanup_paths(None, &prev2.preview_paths);
+        let taken = take_active_if_generation(&mut inner, gen2).expect("gen2");
+        cleanup_paths(None, &taken.preview_paths);
+        for p in [first, second] {
+            if let Some(parent) = p.parent() {
+                let _ = fs::remove_dir(parent);
+            }
         }
     }
 }

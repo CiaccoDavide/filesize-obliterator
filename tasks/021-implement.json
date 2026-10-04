@@ -34,6 +34,7 @@
   },
   "notes": [
     "preview_allow_assets(jobId) validates completed image job via JobManager, rasterizes TIFF/HEIC (sips/image), copies web-native formats to temp, grants only temps.",
-    "assetProtocol.scope stays empty []; whole-filesystem ** removed."
+    "assetProtocol.scope stays empty []; whole-filesystem ** removed.",
+    "ActiveGrant carries grantGeneration; preview_revoke_assets(grantGeneration) no-ops on stale tokens; allow holds grant mutex across prepare_preview_raster."
   ]
 }

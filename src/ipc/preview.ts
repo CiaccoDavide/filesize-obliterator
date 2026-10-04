@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 export type PreviewAssets = {
   sourcePath: string;
   outputPath: string;
+  /** Token for this grant; only revoke with this generation. */
+  grantGeneration: number;
 };
 
 /**
@@ -13,7 +15,10 @@ export function previewAllowAssets(jobId: string): Promise<PreviewAssets> {
   return invoke<PreviewAssets>("preview_allow_assets", { jobId });
 }
 
-/** Revoke the active preview grants (call when the overlay closes). */
-export function previewRevokeAssets(): Promise<void> {
-  return invoke<void>("preview_revoke_assets");
+/**
+ * Revoke preview grants for `grantGeneration` only.
+ * Stale tokens (cancelled overlay / superseded allow) are ignored by the backend.
+ */
+export function previewRevokeAssets(grantGeneration: number): Promise<void> {
+  return invoke<void>("preview_revoke_assets", { grantGeneration });
 }

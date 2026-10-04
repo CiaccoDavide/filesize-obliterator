@@ -120,12 +120,15 @@ export function ImageComparePreview({ target, onClose }: Props) {
     setDisplaySource("");
     setDisplayOutput("");
     let cancelled = false;
+    let grantGeneration: number | null = null;
     void previewAllowAssets(target.jobId)
       .then((assets) => {
         if (cancelled) {
-          void previewRevokeAssets();
+          // Only revoke this allow's generation — never wipe a newer overlay.
+          void previewRevokeAssets(assets.grantGeneration);
           return;
         }
+        grantGeneration = assets.grantGeneration;
         setDisplaySource(assets.sourcePath);
         setDisplayOutput(assets.outputPath);
         setAssetReady(true);
@@ -135,7 +138,9 @@ export function ImageComparePreview({ target, onClose }: Props) {
       });
     return () => {
       cancelled = true;
-      void previewRevokeAssets();
+      if (grantGeneration != null) {
+        void previewRevokeAssets(grantGeneration);
+      }
     };
   }, [key, target.jobId]);
 
