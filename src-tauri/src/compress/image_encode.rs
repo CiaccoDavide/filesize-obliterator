@@ -56,7 +56,10 @@ pub fn encode_image(source: &Path, preset_id: &str, dest: &Path) -> Result<(), S
         ImageEncodeTarget::Webp { quality } => {
             let rgba = img.to_rgba8();
             let encoder = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height());
-            let encoded = encoder.encode(quality);
+            // Prefer fallible encode_simple — Encoder::encode unwraps and can panic the worker.
+            let encoded = encoder
+                .encode_simple(false, quality)
+                .map_err(|e| format!("webp encode failed: {e:?}"))?;
             std::fs::write(dest, &*encoded).map_err(|e| format!("cannot write output: {e}"))?;
         }
     }
@@ -98,6 +101,21 @@ mod tests {
         img.save(path).expect("save png");
     }
 
+    /// Soft photo-like RGB (smooth gradients + mild noise) — closer to camera stills than
+    /// hard synthetic patterns, so lossy WebP size claims stay meaningful.
+    fn write_photo_like_png(path: &Path, w: u32, h: u32) {
+        let img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_fn(w, h, |x, y| {
+            let fx = x as f32 / w as f32;
+            let fy = y as f32 / h as f32;
+            let noise = ((x.wrapping_mul(374761393) ^ y.wrapping_mul(668265263)) % 17) as f32;
+            let r = ((0.35 + 0.45 * fx) * 255.0 + noise).clamp(0.0, 255.0) as u8;
+            let g = ((0.40 + 0.35 * fy) * 255.0 + noise * 0.5).clamp(0.0, 255.0) as u8;
+            let b = ((0.55 + 0.25 * (1.0 - fx) * fy) * 255.0).clamp(0.0, 255.0) as u8;
+            Rgba([r, g, b, 255])
+        });
+        img.save(path).expect("save photo-like png");
+    }
+
     #[test]
     fn encodes_png_jpeg_webp_inputs_for_each_preset() {
         let dir = temp_dir("roundtrip");
@@ -119,6 +137,32 @@ mod tests {
             encode_image(src, preset, &out).unwrap_or_else(|e| panic!("{preset}: {e}"));
             assert!(out.is_file(), "missing {preset}");
             assert!(fs::metadata(&out).unwrap().len() > 0);
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn balanced_and_small_shrink_photo_like_png_and_jpeg() {
+        let dir = temp_dir("shrink-photo");
+        let png = dir.join("scene.png");
+        write_photo_like_png(&png, 480, 320);
+        let png_bytes = fs::metadata(&png).unwrap().len();
+
+        let jpeg = dir.join("scene.jpg");
+        encode_image(&png, IMAGE_HIGH, &jpeg).expect("photo-like jpeg fixture");
+        let jpeg_bytes = fs::metadata(&jpeg).unwrap().len();
+
+        for (src, src_bytes, label) in [(&png, png_bytes, "png"), (&jpeg, jpeg_bytes, "jpeg")] {
+            for preset in [IMAGE_BALANCED, IMAGE_SMALL] {
+                let out = dir.join(format!("{label}-{preset}.webp"));
+                encode_image(src, preset, &out).unwrap_or_else(|e| panic!("{label}/{preset}: {e}"));
+                let out_bytes = fs::metadata(&out).unwrap().len();
+                assert!(
+                    out_bytes <= src_bytes,
+                    "{preset} should shrink typical-ish {label}: {out_bytes} > {src_bytes}"
+                );
+            }
         }
 
         let _ = fs::remove_dir_all(&dir);

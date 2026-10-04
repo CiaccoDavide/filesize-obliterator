@@ -53,12 +53,13 @@ impl ImagePreset {
     }
 }
 
-/// High prioritizes visual quality over size (may not shrink already-optimized inputs).
+/// Built-in image presets. `image-high` is quality-first (may not shrink already-optimized
+/// inputs); `image-balanced` / `image-small` target size on typical photo-like JPEG/PNG.
 const IMAGE_PRESETS: &[ImagePreset] = &[
     ImagePreset {
         id: IMAGE_HIGH,
         label: "High",
-        description: "High-quality JPEG (~q90). Prefers fidelity; size savings are modest on already-compressed photos.",
+        description: "High-quality JPEG (~q90). Quality-first: prefers fidelity; may not shrink already-optimized photos.",
         target: ImageEncodeTarget::Jpeg { quality: 90 },
     },
     ImagePreset {
