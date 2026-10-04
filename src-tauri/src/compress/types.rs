@@ -127,5 +127,12 @@ mod tests {
         assert_eq!(req.source_path, "/a.png");
         assert_eq!(req.media_kind, MediaKind::Image);
         assert_eq!(req.preset_id, "stub");
+
+        let pdf_raw =
+            r#"{"sourcePath":"/docs/report.pdf","mediaKind":"pdf","presetId":"pdf-ebook"}"#;
+        let pdf_req: CompressStartRequest = serde_json::from_str(pdf_raw).expect("de pdf");
+        assert_eq!(pdf_req.source_path, "/docs/report.pdf");
+        assert_eq!(pdf_req.media_kind, MediaKind::Pdf);
+        assert_eq!(pdf_req.preset_id, "pdf-ebook");
     }
 }

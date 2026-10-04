@@ -6,7 +6,7 @@
 //! Bad input → `unsupported or corrupt pdf…`.
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -78,15 +78,17 @@ Install Ghostscript locally or bundle it as a sidecar for offline PDF compressio
 }
 
 fn which_ghostscript() -> Option<PathBuf> {
+    // On Windows the first name (`gs`) is often absent; NotFound must not abort the loop
+    // before `gswin64c` / `gswin32c` are tried.
     for name in ["gs", "gswin64c", "gswin32c", "ghostscript"] {
-        let status = Command::new(name)
+        match Command::new(name)
             .arg("-v")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .ok()?;
-        if status.success() {
-            return Some(PathBuf::from(name));
+        {
+            Ok(status) if status.success() => return Some(PathBuf::from(name)),
+            Ok(_) | Err(_) => continue,
         }
     }
     None
@@ -94,17 +96,50 @@ fn which_ghostscript() -> Option<PathBuf> {
 
 /// Reject password-protected PDFs up front (no password UI in this task).
 fn reject_encrypted_pdf(source: &Path) -> Result<(), String> {
-    let bytes = fs::read(source).map_err(|e| format!("cannot read source: {e}"))?;
-    if bytes.len() < 5 || !bytes.starts_with(b"%PDF-") {
+    let mut file = fs::File::open(source).map_err(|e| format!("cannot read source: {e}"))?;
+    let mut header = [0u8; 8];
+    let n = file
+        .read(&mut header)
+        .map_err(|e| format!("cannot read source: {e}"))?;
+    if n < 5 || !header[..n].starts_with(b"%PDF-") {
         return Err("unsupported or corrupt pdf: missing %PDF header".into());
     }
-    // Trailer `/Encrypt` is the standard marker; avoid matching the literal in content streams
-    // that are unlikely in typical docs by also requiring a trailer-ish neighborhood.
-    if pdf_appears_encrypted(&bytes) {
+
+    // `/Encrypt` lives in the trailer (near EOF); linearized PDFs may also advertise it early.
+    // Scan a bounded prefix + suffix instead of allocating the whole file.
+    const WINDOW: u64 = 512 * 1024;
+    let len = file
+        .metadata()
+        .map_err(|e| format!("cannot read source: {e}"))?
+        .len();
+    let mut buf = Vec::new();
+
+    let prefix = len.min(WINDOW);
+    buf.resize(prefix as usize, 0);
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("cannot read source: {e}"))?;
+    file.read_exact(&mut buf)
+        .map_err(|e| format!("cannot read source: {e}"))?;
+    if pdf_appears_encrypted(&buf) {
         return Err(
             "encrypted pdf: password-protected PDFs are not supported (no password UI)"
                 .into(),
         );
+    }
+
+    if len > WINDOW {
+        let start = len - WINDOW;
+        buf.resize(WINDOW as usize, 0);
+        file.seek(SeekFrom::Start(start))
+            .map_err(|e| format!("cannot read source: {e}"))?;
+        file.read_exact(&mut buf)
+            .map_err(|e| format!("cannot read source: {e}"))?;
+        if pdf_appears_encrypted(&buf) {
+            return Err(
+                "encrypted pdf: password-protected PDFs are not supported (no password UI)"
+                    .into(),
+            );
+        }
     }
     Ok(())
 }
@@ -327,15 +362,17 @@ startxref\n\
         fs::write(path, content).expect("write minimal pdf");
     }
 
-    /// Image-heavy PDF (lossless PNG embeds). Screen should shrink vs print.
-    /// Prefers `magick`+`img2pdf`; falls back to Ghostscript raster → PDF.
+    /// Image-heavy PDF with embedded rasters. Screen should shrink vs print.
+    /// Prefers `img2pdf` / `magick`; otherwise Ghostscript JPEG → embedded DCT pages.
+    /// Never falls back to vector-only pages (that would make screen≈print).
     fn write_image_heavy_pdf(path: &Path) {
         let dir = path.parent().expect("parent");
         let png_a = dir.join("heavy-a.png");
         let png_b = dir.join("heavy-b.png");
+        const W: u32 = 1200;
+        const H: u32 = 900;
 
-        let made_png = write_plasma_png(&png_a, 1200, 900)
-            && write_plasma_png(&png_b, 1200, 900);
+        let made_png = write_plasma_png(&png_a, W, H) && write_plasma_png(&png_b, W, H);
         assert!(made_png, "could not create PNG fixtures (need magick or gs)");
 
         let img2pdf = Command::new("img2pdf")
@@ -345,6 +382,7 @@ startxref\n\
             .arg(path)
             .status();
         if img2pdf.map(|s| s.success()).unwrap_or(false) && path.is_file() {
+            assert_fixture_embeds_images(path);
             return;
         }
 
@@ -354,12 +392,110 @@ startxref\n\
             .arg(path)
             .status();
         if magick.map(|s| s.success()).unwrap_or(false) && path.is_file() {
+            assert_fixture_embeds_images(path);
             return;
         }
 
-        // Ghostscript: paint a large bitmap page into a PDF (no img2pdf/magick).
+        // Ghostscript path: raster JPEGs (not vectors), then embed as DCT image XObjects.
         let gs = require_gs();
-        let status = Command::new(&gs)
+        let jpeg_a = dir.join("heavy-a.jpg");
+        let jpeg_b = dir.join("heavy-b.jpg");
+        assert!(
+            write_plasma_jpeg(&gs, &jpeg_a, W, H) && write_plasma_jpeg(&gs, &jpeg_b, W, H),
+            "could not create JPEG fixtures via ghostscript"
+        );
+        assert!(
+            write_pdf_with_embedded_jpegs(&gs, path, &[&jpeg_a, &jpeg_b], W, H),
+            "could not build image-heavy PDF with embedded JPEGs"
+        );
+        assert_fixture_embeds_images(path);
+    }
+
+    fn assert_fixture_embeds_images(path: &Path) {
+        let bytes = fs::read(path).expect("read fixture");
+        let has_image = bytes.windows(6).any(|w| w == b"/Image")
+            || bytes.windows(10).any(|w| w == b"/DCTDecode");
+        assert!(
+            has_image,
+            "image-heavy fixture must embed raster images (no silent vector fallback)"
+        );
+    }
+
+    fn ps_path_literal(path: &Path) -> String {
+        let s = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let s = s.to_string_lossy();
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('(');
+        for c in s.chars() {
+            match c {
+                '(' | ')' | '\\' => {
+                    out.push('\\');
+                    out.push(c);
+                }
+                _ => out.push(c),
+            }
+        }
+        out.push(')');
+        out
+    }
+
+    fn write_plasma_jpeg(gs: &Path, path: &Path, w: u32, h: u32) -> bool {
+        if Command::new("magick")
+            .args([
+                "-size",
+                &format!("{w}x{h}"),
+                "plasma:fractal",
+                path.to_str().unwrap_or(""),
+            ])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+            && path.is_file()
+        {
+            return true;
+        }
+        // Rasterize noisy fills to a real JPEG (bitmap), never leave as PDF vectors.
+        Command::new(gs)
+            .args([
+                "-q",
+                "-dNOPAUSE",
+                "-dBATCH",
+                "-dSAFER",
+                "-sDEVICE=jpeg",
+                "-dJPEGQ=95",
+                "-r72",
+                &format!("-g{w}x{h}"),
+                &format!("-sOutputFile={}", path.display()),
+                "-c",
+                "0 1 40 { /i exch def 0 1 30 { /j exch def \
+                   i 20 mul j 20 mul moveto \
+                   i 255 div j 255 div 0.5 setrgbcolor \
+                   22 22 rectfill } for } for showpage",
+            ])
+            .status()
+            .map(|s| s.success() && path.is_file())
+            .unwrap_or(false)
+    }
+
+    fn write_pdf_with_embedded_jpegs(
+        gs: &Path,
+        dest: &Path,
+        jpegs: &[&Path],
+        w: u32,
+        h: u32,
+    ) -> bool {
+        let mut ps = String::new();
+        for jpeg in jpegs {
+            let lit = ps_path_literal(jpeg);
+            ps.push_str(&format!(
+                "<< /PageSize [{w} {h}] >> setpagedevice\n\
+                 {w} {h} scale\n\
+                 {w} {h} 8 [{w} 0 0 {h} neg 0 {h}]\n\
+                 {lit} (r) file /DCTDecode filter false 3 colorimage\n\
+                 showpage\n"
+            ));
+        }
+        let status = Command::new(gs)
             .args([
                 "-q",
                 "-dNOPAUSE",
@@ -367,31 +503,12 @@ startxref\n\
                 "-dSAFER",
                 "-sDEVICE=pdfwrite",
                 "-dCompatibilityLevel=1.4",
-                "-g1200x900",
-                "-r150",
-                &format!("-sOutputFile={}", path.display()),
+                &format!("-sOutputFile={}", dest.display()),
                 "-c",
-                "0 1 100 { /i exch def 0 1 75 { /j exch def \
-                   i 12 mul j 12 mul moveto \
-                   i 3 mul 255 mod 255 div \
-                   j 5 mul 255 mod 255 div \
-                   i j add 7 mul 255 mod 255 div setrgbcolor \
-                   14 14 rectfill \
-                 } for } for showpage \
-                 0 1 100 { /i exch def 0 1 75 { /j exch def \
-                   i 12 mul j 12 mul moveto \
-                   j 4 mul 255 mod 255 div \
-                   i 6 mul 255 mod 255 div \
-                   0.4 setrgbcolor \
-                   14 14 rectfill \
-                 } for } for showpage",
+                &ps,
             ])
-            .status()
-            .expect("spawn gs image-heavy pdf");
-        assert!(
-            status.success() && path.is_file(),
-            "could not build image-heavy PDF fixture"
-        );
+            .status();
+        status.map(|s| s.success() && dest.is_file()).unwrap_or(false)
     }
 
     fn write_plasma_png(path: &Path, w: u32, h: u32) -> bool {
