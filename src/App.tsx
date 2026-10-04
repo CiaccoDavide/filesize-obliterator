@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { FileDropZone } from "./components/FileDropZone";
+import { IntakeStatus } from "./components/IntakeStatus";
+import { StagedFileList } from "./components/StagedFileList";
+import { useFileIntake } from "./hooks/useFileIntake";
 import "./App.css";
 
 type AppInfo = {
@@ -7,10 +11,21 @@ type AppInfo = {
   version: string;
 };
 
+function statusTone(status: string): "ok" | "warn" | "danger" {
+  if (status.startsWith("REJECTED") || status.startsWith("INTAKE FAILED") || status.startsWith("PICK FAILED")) {
+    return "danger";
+  }
+  if (status.startsWith("PICK CANCELLED") || status.startsWith("ALREADY") || status.startsWith("NO CHANGE")) {
+    return "warn";
+  }
+  return "ok";
+}
+
 function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [pingResult, setPingResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { staged, status, dragActive, pickFiles, clearStaged } = useFileIntake();
 
   useEffect(() => {
     let cancelled = false;
@@ -51,10 +66,23 @@ function App() {
             </p>
           </header>
 
-          <div className="hud-frame setup-surface">
-            <p className="panel-label">Work surface</p>
-            <p className="surface-await">AWAITING INPUT</p>
+          <FileDropZone dragActive={dragActive} onPick={() => void pickFiles()}>
+            <IntakeStatus status={status} tone={statusTone(status)} />
+            <div className="staged-panel">
+              <div className="staged-head">
+                <p className="panel-label">Staged</p>
+                {staged.length > 0 ? (
+                  <button type="button" className="btn" onClick={clearStaged}>
+                    Clear
+                  </button>
+                ) : null}
+              </div>
+              <StagedFileList files={staged} />
+            </div>
+          </FileDropZone>
 
+          <div className="hud-frame setup-surface">
+            <p className="panel-label">Bridge</p>
             {error ? (
               <p className="bridge-status error" role="alert">
                 <span className="hud-tick" aria-hidden="true" />
