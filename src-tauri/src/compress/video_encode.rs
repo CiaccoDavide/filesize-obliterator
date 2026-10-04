@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use super::presets::{video_preset, VideoEncodeTarget, VideoPreset};
 
@@ -184,21 +185,25 @@ pub fn hw_encoder_candidates() -> &'static [HwVideoEncoder] {
     }
 }
 
-/// Parse `ffmpeg -encoders` text for the first preferred HW encoder.
-pub fn select_hw_encoder_from_list(encoders_text: &str) -> Option<HwVideoEncoder> {
-    for candidate in hw_encoder_candidates() {
-        let name = candidate.ffmpeg_name();
-        // Match a whole encoder token (ffmpeg prints " V....D name  desc").
-        for line in encoders_text.lines() {
-            let mut parts = line.split_whitespace();
-            // flags token then name
-            let _flags = parts.next();
-            if parts.next() == Some(name) {
-                return Some(*candidate);
-            }
+/// True when `encoders_text` lists the encoder as a whole token (ffmpeg `-encoders` line).
+pub fn encoder_listed_in(encoders_text: &str, encoder: HwVideoEncoder) -> bool {
+    let name = encoder.ffmpeg_name();
+    for line in encoders_text.lines() {
+        let mut parts = line.split_whitespace();
+        let _flags = parts.next();
+        if parts.next() == Some(name) {
+            return true;
         }
     }
-    None
+    false
+}
+
+/// Parse `ffmpeg -encoders` text for the first preferred HW encoder that is listed.
+pub fn select_hw_encoder_from_list(encoders_text: &str) -> Option<HwVideoEncoder> {
+    hw_encoder_candidates()
+        .iter()
+        .copied()
+        .find(|candidate| encoder_listed_in(encoders_text, *candidate))
 }
 
 fn ffmpeg_encoders_text(ffmpeg: &Path) -> Option<String> {
@@ -214,10 +219,95 @@ fn ffmpeg_encoders_text(ffmpeg: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Detect a usable HW H.264 encoder on this machine via local ffmpeg (offline).
-pub fn detect_hw_encoder(ffmpeg: &Path) -> Option<HwVideoEncoder> {
+/// Probe whether a listed HW encoder can actually open a session (not just appear in `-encoders`).
+///
+/// Listing-only is insufficient: many ffmpeg builds advertise NVENC/QSV/AMF/VT without working
+/// hardware. A one-frame lavfi encode to `null` proves init usability.
+pub fn probe_hw_encoder_init(ffmpeg: &Path, encoder: HwVideoEncoder) -> bool {
+    let mut args: Vec<String> = vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-f".into(),
+        "lavfi".into(),
+        "-i".into(),
+        "color=c=black:s=64x64:d=0.2:r=10".into(),
+        "-frames:v".into(),
+        "1".into(),
+        "-an".into(),
+    ];
+    // Minimal codec knobs matching production encode paths (incl. VT `-allow_sw 0`).
+    match encoder {
+        HwVideoEncoder::VideoToolbox => {
+            args.push("-c:v".into());
+            args.push(encoder.ffmpeg_name().into());
+            args.push("-q:v".into());
+            args.push("65".into());
+            args.push("-allow_sw".into());
+            args.push("0".into());
+        }
+        HwVideoEncoder::Nvenc => {
+            args.push("-c:v".into());
+            args.push(encoder.ffmpeg_name().into());
+            args.push("-preset".into());
+            args.push("p4".into());
+            args.push("-rc".into());
+            args.push("vbr".into());
+            args.push("-cq".into());
+            args.push("28".into());
+        }
+        HwVideoEncoder::Qsv => {
+            args.push("-c:v".into());
+            args.push(encoder.ffmpeg_name().into());
+            args.push("-global_quality".into());
+            args.push("28".into());
+        }
+        HwVideoEncoder::Amf => {
+            args.push("-c:v".into());
+            args.push(encoder.ffmpeg_name().into());
+            args.push("-rc".into());
+            args.push("cqp".into());
+            args.push("-qp_i".into());
+            args.push("28".into());
+            args.push("-qp_p".into());
+            args.push("28".into());
+        }
+    }
+    args.push("-pix_fmt".into());
+    args.push("yuv420p".into());
+    args.push("-f".into());
+    args.push("null".into());
+    args.push("-".into());
+
+    let output = Command::new(ffmpeg)
+        .args(&args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output();
+    match output {
+        Ok(out) => out.status.success(),
+        Err(_) => false,
+    }
+}
+
+/// Detect a usable HW H.264 encoder: listed by ffmpeg *and* able to init a HW session.
+pub fn detect_hw_encoder_uncached(ffmpeg: &Path) -> Option<HwVideoEncoder> {
     let text = ffmpeg_encoders_text(ffmpeg)?;
-    select_hw_encoder_from_list(&text)
+    for candidate in hw_encoder_candidates() {
+        if !encoder_listed_in(&text, *candidate) {
+            continue;
+        }
+        if probe_hw_encoder_init(ffmpeg, *candidate) {
+            return Some(*candidate);
+        }
+    }
+    None
+}
+
+/// Cached detect so UI status + each video job share one init probe per process.
+pub fn detect_hw_encoder(ffmpeg: &Path) -> Option<HwVideoEncoder> {
+    static CACHED: OnceLock<Option<HwVideoEncoder>> = OnceLock::new();
+    *CACHED.get_or_init(|| detect_hw_encoder_uncached(ffmpeg))
 }
 
 /// UI / IPC capability probe: `HW: READY` or `HW: UNAVAILABLE`.
@@ -487,7 +577,7 @@ fn run_ffmpeg_encode(
 ///
 /// `on_progress` receives percent in `0.0..=100.0` during the encode; return `false` to stop.
 /// When `cancel` is set, the ffmpeg child is killed and the error is `"cancelled"`.
-/// When `prefer_hardware` is true and a platform HW encoder is listed by ffmpeg, try it first;
+/// When `prefer_hardware` is true and a usable platform HW encoder is detected, try it first;
 /// on failure (other than cancel), emit [`HW_FALLBACK_LOG`] via `on_log` and retry with libx264.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_video(
@@ -495,9 +585,39 @@ pub fn encode_video(
     preset_id: &str,
     dest: &Path,
     cancel: Option<&AtomicBool>,
-    mut on_progress: Option<&mut dyn FnMut(f64) -> bool>,
+    on_progress: Option<&mut dyn FnMut(f64) -> bool>,
     strip_metadata: bool,
     prefer_hardware: bool,
+    on_log: Option<&mut dyn FnMut(&str)>,
+) -> Result<(), String> {
+    let ffmpeg = resolve_ffmpeg()?;
+    let hw = if prefer_hardware {
+        detect_hw_encoder(&ffmpeg)
+    } else {
+        None
+    };
+    encode_video_with_hw(
+        source,
+        preset_id,
+        dest,
+        cancel,
+        on_progress,
+        strip_metadata,
+        hw,
+        on_log,
+    )
+}
+
+/// Encode trying an explicit HW encoder first (test seam for forced HW failure → fallback).
+#[allow(clippy::too_many_arguments)]
+fn encode_video_with_hw(
+    source: &Path,
+    preset_id: &str,
+    dest: &Path,
+    cancel: Option<&AtomicBool>,
+    mut on_progress: Option<&mut dyn FnMut(f64) -> bool>,
+    strip_metadata: bool,
+    hw: Option<HwVideoEncoder>,
     mut on_log: Option<&mut dyn FnMut(&str)>,
 ) -> Result<(), String> {
     let preset: &VideoPreset = video_preset(preset_id)
@@ -513,12 +633,6 @@ pub fn encode_video(
     if cancelled(cancel) {
         return Err("cancelled".into());
     }
-
-    let hw = if prefer_hardware {
-        detect_hw_encoder(&ffmpeg)
-    } else {
-        None
-    };
 
     if let Some(encoder) = hw {
         let args = build_ffmpeg_args(source, dest, &preset.target, strip_metadata, Some(encoder));
@@ -1029,14 +1143,23 @@ mod tests {
         assert!(!args.iter().any(|a| a == "libx264"));
     }
 
+    /// Cross-platform encoder that cannot init on this host (forces HW failure → fallback).
+    fn forced_unusable_hw_encoder() -> HwVideoEncoder {
+        if cfg!(target_os = "macos") {
+            HwVideoEncoder::Nvenc
+        } else {
+            HwVideoEncoder::VideoToolbox
+        }
+    }
+
     #[test]
     fn prefer_hardware_smoke_encode_when_ready() {
         let Some(ffmpeg) = require_ffmpeg() else {
             return;
         };
-        let Some(hw) = detect_hw_encoder(&ffmpeg) else {
-            eprintln!("ignoring test: no HW encoder ({})", hw_encode_status());
-            assert_eq!(hw_encode_status(), HW_STATUS_UNAVAILABLE);
+        // Use uncached detect so this test asserts real init usability, not a stale cache.
+        let Some(hw) = detect_hw_encoder_uncached(&ffmpeg) else {
+            eprintln!("ignoring test: no usable HW encoder");
             return;
         };
         assert_eq!(hw_encode_status(), HW_STATUS_READY);
@@ -1048,14 +1171,14 @@ mod tests {
         let mut on_log = |msg: &str| {
             logs.lock().unwrap().push(msg.to_string());
         };
-        encode_video(
+        encode_video_with_hw(
             &src,
             VIDEO_SMALL,
             &out,
             None,
             None,
             true,
-            true,
+            Some(hw),
             Some(&mut on_log),
         )
         .unwrap_or_else(|e| panic!("HW prefer encode failed ({hw:?}): {e}"));
@@ -1068,6 +1191,65 @@ mod tests {
             logs.lock().unwrap()
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hw_encode_failure_emits_fallback_log_and_retries_software() {
+        let Some(ffmpeg) = require_ffmpeg() else {
+            return;
+        };
+        let bad = forced_unusable_hw_encoder();
+        assert!(
+            !probe_hw_encoder_init(&ffmpeg, bad),
+            "forced encoder {:?} must fail HW init on this host",
+            bad
+        );
+
+        let dir = temp_dir("hw-fallback");
+        let src = dir.join("tone.mp4");
+        write_fixture_mp4(&src, 0.4);
+        let out = dir.join("out.mp4");
+        let logs = std::sync::Mutex::new(Vec::<String>::new());
+        let mut on_log = |msg: &str| {
+            logs.lock().unwrap().push(msg.to_string());
+        };
+
+        encode_video_with_hw(
+            &src,
+            VIDEO_SMALL,
+            &out,
+            None,
+            None,
+            true,
+            Some(bad),
+            Some(&mut on_log),
+        )
+        .expect("software retry after HW failure must succeed");
+
+        assert!(out.is_file());
+        assert!(fs::metadata(&out).unwrap().len() > 0);
+        let captured = logs.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|m| m == HW_FALLBACK_LOG),
+            "expected {HW_FALLBACK_LOG} in log stream, got {captured:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_probe_rejects_unusable_listed_style_encoder() {
+        let Some(ffmpeg) = require_ffmpeg() else {
+            return;
+        };
+        let bad = forced_unusable_hw_encoder();
+        assert!(!probe_hw_encoder_init(&ffmpeg, bad));
+        // Listing alone must not mark READY when init fails for all candidates.
+        // (Uncached path walks candidates; a foreign encoder is never selected as READY.)
+        let status_ready_implies_init = match detect_hw_encoder_uncached(&ffmpeg) {
+            Some(enc) => probe_hw_encoder_init(&ffmpeg, enc),
+            None => true,
+        };
+        assert!(status_ready_implies_init);
     }
 
     #[test]

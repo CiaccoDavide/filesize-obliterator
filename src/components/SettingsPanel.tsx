@@ -86,7 +86,7 @@ export function SettingsPanel({
       </label>
       <p className="hud-toggle-hint">
         {settings.preferHardware
-          ? "Use VideoToolbox / NVENC / QSV / AMF when listed by local ffmpeg; soft-fallback to libx264."
+          ? "Use VideoToolbox / NVENC / QSV / AMF when a local ffmpeg HW session can init; soft-fallback to libx264."
           : "Always encode video with software libx264."}
       </p>
       <p

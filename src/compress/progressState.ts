@@ -291,6 +291,8 @@ export function applyCompressEvent(
   let working = rows;
   let idx = working.findIndex((r) => r.jobId === event.jobId);
   if (idx === -1) {
+    // Stray/late logs must not invent rows; statusMessage is only for known jobs.
+    if (event.type === "log") return rows;
     working = [...rows, placeholderRow(event.jobId)];
     idx = working.length - 1;
   }

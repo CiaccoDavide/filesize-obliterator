@@ -150,6 +150,16 @@ describe("applyCompressEvent", () => {
     expect(rows[0].phase).toBe("COMPRESSING");
   });
 
+  it("ignores log events for unknown jobIds", () => {
+    const before = [row({ phase: "COMPRESSING" })];
+    const rows = applyCompressEvent(before, {
+      type: "log",
+      jobId: "ghost-job",
+      message: "HW FALLBACK",
+    });
+    expect(rows).toEqual(before);
+  });
+
   it("updates percent and bytes on progress without refresh", () => {
     const rows = applyCompressEvent([row({ phase: "COMPRESSING" })], {
       type: "progress",
