@@ -19,15 +19,15 @@ export function PresetPicker({
   if (kinds.length === 0) {
     return (
       <div className="hud-frame preset-panel">
-        <p className="panel-label">Alternatives</p>
-        <p className="preset-empty mono">Stage files to choose presets.</p>
+        <p className="panel-label">Presets</p>
+        <p className="preset-empty mono">Stage files to arm presets.</p>
       </div>
     );
   }
 
   return (
     <div className="hud-frame preset-panel">
-      <p className="panel-label">Alternatives</p>
+      <p className="panel-label">Presets</p>
       <div className="preset-kinds">
         {kinds.map((kind) => {
           const options = byKind[kind] ?? [];

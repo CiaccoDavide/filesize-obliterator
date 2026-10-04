@@ -20,15 +20,10 @@ type Props = {
   phase: OpsPhase;
   batchSummary: BatchSummary | null;
   error: string | null;
-  starting: boolean;
   canAbort: boolean;
   aborting: boolean;
   canRetryFailed: boolean;
   canDismissFailed: boolean;
-  stagedCount: number;
-  estimating?: boolean;
-  onStart: () => void;
-  onPreview?: () => void;
   onAbort: () => void;
   onCancelOne: (jobId: string) => void;
   onClearFinished: () => void;
@@ -84,15 +79,10 @@ export function CompressProgressPanel({
   phase,
   batchSummary,
   error,
-  starting,
   canAbort,
   aborting,
   canRetryFailed,
   canDismissFailed,
-  stagedCount,
-  estimating = false,
-  onStart,
-  onPreview,
   onAbort,
   onCancelOne,
   onClearFinished,
@@ -168,26 +158,6 @@ export function CompressProgressPanel({
         </div>
 
         <div className="compress-actions">
-          {onPreview ? (
-            <button
-              type="button"
-              className="btn"
-              disabled={
-                estimating || starting || stagedCount === 0 || canAbort
-              }
-              onClick={onPreview}
-            >
-              {estimating ? "ESTIMATING" : "PREVIEW"}
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="btn primary"
-            disabled={starting || stagedCount === 0 || canAbort}
-            onClick={onStart}
-          >
-            {starting ? "STARTING" : "COMPRESS"}
-          </button>
           <button
             type="button"
             className={`btn danger${aborting ? " aborting" : ""}`}

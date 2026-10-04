@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { CompressProgressPanel } from "./components/CompressProgressPanel";
+import { DiagnosticsDisclosure } from "./components/DiagnosticsDisclosure";
 import { EstimateSummaryStrip } from "./components/EstimateSummaryStrip";
 import { FileDropZone } from "./components/FileDropZone";
 import {
@@ -25,6 +26,11 @@ import { revealInFileManager } from "./ipc/reveal";
 import { useKeyboardShortcuts } from "./keyboard/useKeyboardShortcuts";
 import type { RevealAction } from "./reveal/actions";
 import { kindsPresent } from "./presets/selection";
+import {
+  deriveShellMode,
+  shellShowsOps,
+  shellShowsProgress,
+} from "./shell/mode";
 import "./App.css";
 
 type AppInfo = {
@@ -66,7 +72,7 @@ function App() {
   /** Operator reopened BRIEFING after ACK (does not clear briefingSeen). */
   const [briefingHelpRequested, setBriefingHelpRequested] = useState(false);
   const dropZoneRef = useRef<HTMLDivElement>(null);
-  const settingsRef = useRef<HTMLDivElement>(null);
+  const settingsRef = useRef<HTMLDetailsElement>(null);
   const local = useLocalSettings();
   const presets = usePresets({
     preferredDefaults: local.settings.defaultPresets,
@@ -85,6 +91,15 @@ function App() {
   const compress = useCompressProgress();
   const estimate = useCompressEstimate();
 
+  const shellMode = useMemo(
+    () =>
+      deriveShellMode({
+        stagedCount: staged.length,
+        phase: compress.phase,
+      }),
+    [staged.length, compress.phase],
+  );
+
   const focusDropZone = useCallback(() => {
     dropZoneRef.current?.focus();
     dropZoneRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -93,8 +108,10 @@ function App() {
   const openSettings = useCallback(() => {
     const el = settingsRef.current;
     if (!el) return;
+    el.open = true;
     el.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    el.focus();
+    const focusTarget = el.querySelector<HTMLElement>("[data-settings-focus]");
+    focusTarget?.focus();
   }, []);
 
   const shortcutHandlers = useMemo(
@@ -231,22 +248,144 @@ function App() {
     [setStatus],
   );
 
-  const shellClass =
+  const densityClass =
     local.settings.uiDensity === "regular"
-      ? "app-shell density-regular"
-      : "app-shell density-compact";
+      ? "density-regular"
+      : "density-compact";
+
+  const showOps = shellShowsOps(shellMode);
+  const showProgress = shellShowsProgress(shellMode);
+  const progressFirst = showProgress;
+
+  const startDisabled =
+    compress.starting || staged.length === 0 || compress.canAbort;
+
+  const progressPanel = showProgress ? (
+    <CompressProgressPanel
+      rows={compress.rows}
+      phase={compress.phase}
+      batchSummary={compress.batchSummary}
+      error={compress.error}
+      canAbort={compress.canAbort}
+      aborting={compress.aborting}
+      canRetryFailed={compress.canRetryFailed}
+      canDismissFailed={compress.canDismissFailed}
+      onAbort={() => void compress.abortAll()}
+      onCancelOne={(jobId) => void compress.cancelOne(jobId)}
+      onClearFinished={compress.clearFinished}
+      onRetryFailed={() => void compress.retryFailed()}
+      onDismissFailed={compress.dismissFailed}
+      onPreviewImage={handlePreviewImage}
+      onReveal={(action, targets) => void handleReveal(action, targets)}
+    />
+  ) : null;
+
+  const opsStrip = showOps ? (
+    <div className="ops-strip hud-frame" data-testid="ops-strip">
+      <p className="panel-label">Ops</p>
+      <div className="ops-toggles">
+        <label className="hud-toggle">
+          <input
+            type="checkbox"
+            checked={local.settings.stripMetadata}
+            disabled={!local.loaded}
+            onChange={(e) => local.setStripMetadata(e.target.checked)}
+          />
+          <span className="hud-toggle-label">Privacy</span>
+          <span className="mono hud-toggle-state">
+            {local.settings.stripMetadata ? "ON" : "OFF"}
+          </span>
+        </label>
+        <label className="hud-toggle">
+          <input
+            type="checkbox"
+            checked={forceReencode}
+            onChange={(e) => setForceReencode(e.target.checked)}
+          />
+          <span className="hud-toggle-label">Force</span>
+          <span className="mono hud-toggle-state">
+            {forceReencode ? "ON" : "OFF"}
+          </span>
+        </label>
+      </div>
+      <p className="hud-toggle-hint">
+        Privacy strips EXIF/GPS. Force re-encodes even when output exists.
+      </p>
+
+      <EstimateSummaryStrip
+        summary={estimate.summary}
+        estimating={estimate.estimating}
+        error={estimate.error}
+      />
+
+      <PresetPicker
+        kinds={presentKinds}
+        byKind={presets.byKind}
+        selected={presets.presetByKind}
+        onSelect={handlePresetSelect}
+        disabled={!presets.loaded}
+      />
+
+      <div className="ops-start" data-testid="ops-start">
+        <button
+          type="button"
+          className="btn"
+          disabled={
+            estimate.estimating || startDisabled
+          }
+          onClick={() => void estimate.previewStaged(staged)}
+        >
+          {estimate.estimating ? "ESTIMATING" : "PREVIEW"}
+        </button>
+        <button
+          type="button"
+          className="btn primary"
+          disabled={startDisabled}
+          onClick={() =>
+            void compress.startStaged(staged, {
+              stripMetadata: local.settings.stripMetadata,
+              preferHardware: local.settings.preferHardware,
+              force: forceReencode,
+            })
+          }
+        >
+          {compress.starting ? "STARTING" : "COMPRESS"}
+        </button>
+      </div>
+
+      {presets.error ? (
+        <p className="compress-status tone-danger" role="alert">
+          PRESETS FAILED — {presets.error}
+        </p>
+      ) : null}
+
+      {local.status ? (
+        <p className="compress-status tone-danger" role="alert">
+          {local.status}
+        </p>
+      ) : null}
+    </div>
+  ) : null;
 
   return (
-    <div className={shellClass}>
+    <div className={`app-shell ${densityClass} mode-${shellMode}`}>
       <div className="grid-bg" aria-hidden="true" />
       <main className="app-main">
-        <section className="setup">
+        <section className="setup" data-mode={shellMode}>
           <header className="hud-frame setup-header">
             <p className="brand-mark">Filesize Obliterator</p>
-            <h1 className="brand-tagline">Local media compression.</h1>
-            <p className="brand-sub">
-              Instrument panel for shrinking files on this machine. No cloud.
-            </p>
+            {shellMode === "idle" ? (
+              <>
+                <h1 className="brand-tagline">Local media compression.</h1>
+                <p className="brand-sub">
+                  Instrument panel for shrinking files on this machine. No cloud.
+                </p>
+              </>
+            ) : (
+              <p className="mode-chip mono" aria-live="polite">
+                {shellMode.toUpperCase()}
+              </p>
+            )}
             <p className="keys-hint mono">
               <button
                 type="button"
@@ -264,6 +403,8 @@ function App() {
               </button>
             </p>
           </header>
+
+          {progressFirst ? progressPanel : null}
 
           <FileDropZone
             ref={dropZoneRef}
@@ -288,127 +429,39 @@ function App() {
             </div>
           </FileDropZone>
 
-          <EstimateSummaryStrip
-            summary={estimate.summary}
-            estimating={estimate.estimating}
-            error={estimate.error}
-          />
+          {opsStrip}
+          {!progressFirst ? progressPanel : null}
 
-          <PresetPicker
-            kinds={presentKinds}
-            byKind={presets.byKind}
-            selected={presets.presetByKind}
-            onSelect={handlePresetSelect}
-            disabled={!presets.loaded}
-          />
-
-          {presets.error ? (
-            <p className="compress-status tone-danger" role="alert">
-              PRESETS FAILED — {presets.error}
-            </p>
-          ) : null}
-
-          {local.status ? (
-            <p className="compress-status tone-danger" role="alert">
-              {local.status}
-            </p>
-          ) : null}
-
-          <div
-            ref={settingsRef}
-            tabIndex={-1}
-            className="settings-focus-target"
-            data-settings-focus
-          >
-            <SettingsPanel
-              settings={local.settings}
-              disabled={!local.loaded}
-              hwStatus={hwStatus}
-              onConcurrency={local.setConcurrency}
-              onStripMetadata={local.setStripMetadata}
-              onPreferHardware={local.setPreferHardware}
-              onUiDensity={local.setUiDensity}
-            />
-          </div>
-
-          <div className="hud-frame setup-surface">
-            <p className="panel-label">Session</p>
-            <label className="hud-toggle">
-              <input
-                type="checkbox"
-                checked={forceReencode}
-                onChange={(e) => setForceReencode(e.target.checked)}
-              />
-              <span className="hud-toggle-label">Force</span>
-              <span className="mono hud-toggle-state">
-                {forceReencode ? "ON" : "OFF"}
-              </span>
-            </label>
-            <p className="hud-toggle-hint">
-              {forceReencode
-                ? "Re-encode even when this source+preset already has output."
-                : "Skip when an existing `_compressed` output matches source+preset."}
-            </p>
-            <p
-              className="hud-toggle-hint mono"
-              data-testid="force-payload"
+          <details ref={settingsRef} className="hud-frame secondary-panel">
+            <summary className="secondary-summary">
+              <span className="panel-label">Settings</span>
+            </summary>
+            <div
+              tabIndex={-1}
+              className="settings-focus-target"
+              data-settings-focus
             >
-              compress_start.force={String(forceReencode)}
-            </p>
-          </div>
+              <SettingsPanel
+                settings={local.settings}
+                disabled={!local.loaded}
+                hwStatus={hwStatus}
+                onConcurrency={local.setConcurrency}
+                onStripMetadata={local.setStripMetadata}
+                onPreferHardware={local.setPreferHardware}
+                onUiDensity={local.setUiDensity}
+              />
+            </div>
+          </details>
 
-          <CompressProgressPanel
-            rows={compress.rows}
-            phase={compress.phase}
-            batchSummary={compress.batchSummary}
-            error={compress.error}
-            starting={compress.starting}
-            canAbort={compress.canAbort}
-            aborting={compress.aborting}
-            canRetryFailed={compress.canRetryFailed}
-            canDismissFailed={compress.canDismissFailed}
-            stagedCount={staged.length}
-            estimating={estimate.estimating}
-            onPreview={() => void estimate.previewStaged(staged)}
-            onStart={() =>
-              void compress.startStaged(staged, {
-                stripMetadata: local.settings.stripMetadata,
-                preferHardware: local.settings.preferHardware,
-                force: forceReencode,
-              })
-            }
-            onAbort={() => void compress.abortAll()}
-            onCancelOne={(jobId) => void compress.cancelOne(jobId)}
-            onClearFinished={compress.clearFinished}
-            onRetryFailed={() => void compress.retryFailed()}
-            onDismissFailed={compress.dismissFailed}
-            onPreviewImage={handlePreviewImage}
-            onReveal={(action, targets) => void handleReveal(action, targets)}
+          <DiagnosticsDisclosure
+            error={error}
+            info={info}
+            pingResult={pingResult}
+            forceReencode={forceReencode}
+            stripMetadata={local.settings.stripMetadata}
+            preferHardware={local.settings.preferHardware}
+            hwStatus={hwStatus}
           />
-
-          <div className="hud-frame setup-surface">
-            <p className="panel-label">Bridge</p>
-            {error ? (
-              <p className="bridge-status error" role="alert">
-                <span className="hud-tick" aria-hidden="true" />
-                Backend unavailable
-                <span className="mono">— {error}</span>
-              </p>
-            ) : info && pingResult ? (
-              <p className="bridge-status">
-                <span className="hud-tick" aria-hidden="true" />
-                Bridge ok
-                <span className="mono">
-                  — {info.name} v{info.version} ({pingResult})
-                </span>
-              </p>
-            ) : (
-              <p className="bridge-status">
-                <span className="hud-tick" aria-hidden="true" />
-                Connecting
-              </p>
-            )}
-          </div>
         </section>
       </main>
       {imagePreview ? (

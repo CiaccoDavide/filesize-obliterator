@@ -65,12 +65,6 @@ export function SettingsPanel({
           ? "EXIF/GPS removed on image/video outputs."
           : "Preserve orientation and tags where the pipeline allows."}
       </p>
-      <p
-        className="hud-toggle-hint mono"
-        data-testid="strip-metadata-payload"
-      >
-        compress_start.stripMetadata={String(settings.stripMetadata)}
-      </p>
 
       <label className="hud-toggle">
         <input
@@ -89,19 +83,11 @@ export function SettingsPanel({
           ? "Use VideoToolbox / NVENC / QSV / AMF when a local ffmpeg HW session can init; soft-fallback to libx264."
           : "Always encode video with software libx264."}
       </p>
-      <p
-        className="hud-toggle-hint mono"
-        data-testid="prefer-hardware-payload"
-      >
-        compress_start.preferHardware={String(settings.preferHardware)}
-      </p>
-      <p
-        className="hud-toggle-hint mono"
-        data-testid="hw-encode-status"
-        role="status"
-      >
-        {hwStatus ?? "HW: —"}
-      </p>
+      {hwStatus ? (
+        <p className="hud-toggle-hint mono" role="status">
+          {hwStatus}
+        </p>
+      ) : null}
 
       <div className="settings-density" role="group" aria-label="UI density">
         <p className="hud-toggle-label">Density</p>
