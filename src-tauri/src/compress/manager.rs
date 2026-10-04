@@ -9,10 +9,10 @@ use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 
 use super::audio_encode::encode_audio;
-use super::image_encode::encode_image;
+use super::image_encode::{encode_image, resolve_image_output_ext};
 use super::output::prepare_output_path;
 use super::pdf_encode::encode_pdf;
-use super::presets::{audio_preset, image_preset, pdf_preset, video_preset};
+use super::presets::{audio_preset, pdf_preset, video_preset};
 use super::state::{apply_transition, should_continue, Transition, TransitionError};
 use super::types::{
     CompressEvent, CompressStartRequest, JobInfo, JobStatus, MediaKind, COMPRESS_EVENT,
@@ -288,11 +288,13 @@ fn cancel_job(manager: &JobManager, app: &AppHandle, job_id: String) {
     );
 }
 
-fn resolve_output_ext(media_kind: &MediaKind, preset_id: &str) -> Result<&'static str, String> {
+fn resolve_output_ext(
+    media_kind: &MediaKind,
+    preset_id: &str,
+    source: &Path,
+) -> Result<&'static str, String> {
     match media_kind {
-        MediaKind::Image => image_preset(preset_id)
-            .map(|p| p.output_ext())
-            .ok_or_else(|| format!("unknown image preset: {preset_id}")),
+        MediaKind::Image => resolve_image_output_ext(source, preset_id),
         MediaKind::Audio => audio_preset(preset_id)
             .map(|p| p.output_ext())
             .ok_or_else(|| format!("unknown audio preset: {preset_id}")),
@@ -342,7 +344,8 @@ fn run_job(
         return;
     }
 
-    let output_ext = match resolve_output_ext(&media_kind, &preset_id) {
+    let source = PathBuf::from(&source_path);
+    let output_ext = match resolve_output_ext(&media_kind, &preset_id, &source) {
         Ok(ext) => ext,
         Err(error) => {
             fail_job(&manager, &app, job_id, error);
@@ -372,8 +375,6 @@ fn run_job(
             },
         );
     }
-
-    let source = PathBuf::from(&source_path);
     let output_path = match prepare_output_path(&source, output_ext) {
         Ok(path) => path,
         Err(error) => {

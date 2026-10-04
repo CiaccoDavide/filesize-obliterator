@@ -1,6 +1,7 @@
 //! Offline video compress via a local ffmpeg binary (sidecar / PATH / `FFMPEG_PATH`).
 //!
-//! Inputs: MP4, WebM, MKV (plus MOV/M4V where demuxers allow). Output: `.mp4` (H.264 + AAC).
+//! Inputs: MP4, WebM, MKV, MOV/M4V, plus 3GP/MPEG-TS where local ffmpeg demuxes.
+//! Output: `.mp4` (H.264 + AAC).
 //! No network. Missing ffmpeg → `missing tool: ffmpeg…`. Bad input → `unsupported or corrupt video…`.
 
 use std::io::{BufRead, BufReader};
@@ -10,7 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::presets::{video_preset, VideoEncodeTarget, VideoPreset};
 
 /// Containers this build documents as supported for offline video compress.
-pub const SUPPORTED_VIDEO_CONTAINERS: &[&str] = &["mp4", "webm", "mkv", "mov", "m4v"];
+pub const SUPPORTED_VIDEO_CONTAINERS: &[&str] = &[
+    "mp4", "webm", "mkv", "mov", "m4v", "3gp", "3g2", "ts", "mts", "m2ts",
+];
 
 fn extension_lower(path: &Path) -> String {
     path.extension()
@@ -449,6 +452,9 @@ mod tests {
         assert!(SUPPORTED_VIDEO_CONTAINERS.contains(&"mp4"));
         assert!(SUPPORTED_VIDEO_CONTAINERS.contains(&"webm"));
         assert!(SUPPORTED_VIDEO_CONTAINERS.contains(&"mkv"));
+        assert!(SUPPORTED_VIDEO_CONTAINERS.contains(&"3gp"));
+        assert!(SUPPORTED_VIDEO_CONTAINERS.contains(&"ts"));
+        assert!(SUPPORTED_VIDEO_CONTAINERS.contains(&"m2ts"));
     }
 
     #[test]
