@@ -57,6 +57,18 @@ Still images are compressed locally with Rust codecs (no cloud APIs). Built-in p
 
 Supported inputs: JPEG, PNG, WebP. **HEIC/HEIF** is not supported in this build (no offline decoder bundled). Outputs land beside the source under `_compressed/`.
 
+## Audio compression (offline)
+
+Audio is decoded with Symphonia (pure Rust) and re-encoded to MP3 via a vendored LAME build — no cloud APIs and no ffmpeg runtime dependency. Built-in presets:
+
+| Id | Label | Output | Notes |
+|----|-------|--------|-------|
+| `audio-high` | High | `.mp3` | 320 kbps CBR; quality-first |
+| `audio-balanced` | Balanced | `.mp3` | 192 kbps CBR; default tradeoff |
+| `audio-small` | Small | `.mp3` | 128 kbps CBR; size-first |
+
+Supported inputs: MP3, WAV, AAC, M4A, FLAC. Job errors distinguish **missing codec** (encoder init failure) from **unsupported or corrupt** input. Work runs on a background Rust thread (UI stays responsive). Outputs land beside the source under `_compressed/`.
+
 ## Layout
 
 | Path | Role |
