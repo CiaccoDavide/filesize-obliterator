@@ -3,6 +3,7 @@ import {
   detectPlatform,
   isTypingTarget,
   matchShortcut,
+  resolveShortcutDispatch,
   type ShortcutId,
 } from "./shortcuts";
 
@@ -13,6 +14,8 @@ type Options = {
   canAbort: boolean;
   /** Help overlay open — Escape closes it; other actions (except toggle) ignored. */
   helpOpen: boolean;
+  /** Image compare preview open — Escape dismisses it (component-owned); no abort. */
+  previewOpen: boolean;
   enabled?: boolean;
 };
 
@@ -22,7 +25,7 @@ type Options = {
  */
 export function useKeyboardShortcuts(
   handlers: ShortcutHandlers,
-  { canAbort, helpOpen, enabled = true }: Options,
+  { canAbort, helpOpen, previewOpen, enabled = true }: Options,
 ): void {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
@@ -59,26 +62,23 @@ export function useKeyboardShortcuts(
       );
       if (!id) return;
 
-      const h = handlersRef.current;
+      const action = resolveShortcutDispatch(id, {
+        canAbort,
+        helpOpen,
+        previewOpen,
+      });
+      if (action === "ignore") return;
 
-      if (helpOpen) {
-        if (id === "toggleHelp" || id === "abortAll") {
-          // Escape while help is open closes the overlay (not abort).
-          e.preventDefault();
-          h.toggleHelp?.();
-        }
+      const h = handlersRef.current;
+      e.preventDefault();
+      if (action === "closeHelp") {
+        h.toggleHelp?.();
         return;
       }
-
-      if (id === "abortAll" && !canAbort) return;
-
-      const run = h[id];
-      if (!run) return;
-      e.preventDefault();
-      run();
+      h[id]?.();
     }
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [canAbort, helpOpen, enabled]);
+  }, [canAbort, helpOpen, previewOpen, enabled]);
 }

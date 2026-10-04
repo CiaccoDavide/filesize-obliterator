@@ -142,6 +142,26 @@ export function matchShortcut(
   return null;
 }
 
+/** What the window shortcut handler should do once a chord matched. */
+export type ShortcutDispatch = "run" | "closeHelp" | "ignore";
+
+/**
+ * Overlay priority for Escape: KEYS help and image preview both claim Esc.
+ * Help closes via toggle; preview closes via its own listener — never abort.
+ */
+export function resolveShortcutDispatch(
+  id: ShortcutId,
+  opts: { canAbort: boolean; helpOpen: boolean; previewOpen: boolean },
+): ShortcutDispatch {
+  if (opts.helpOpen) {
+    if (id === "toggleHelp" || id === "abortAll") return "closeHelp";
+    return "ignore";
+  }
+  if (opts.previewOpen) return "ignore";
+  if (id === "abortAll" && !opts.canAbort) return "ignore";
+  return "run";
+}
+
 export function formatChord(def: ShortcutDef, platform: Platform): string {
   const parts: string[] = [];
   if (def.chord.mod) parts.push(platform === "mac" ? "⌘" : "Ctrl");

@@ -128,6 +128,7 @@ function App() {
   useKeyboardShortcuts(shortcutHandlers, {
     canAbort: compress.canAbort,
     helpOpen: keysOpen,
+    previewOpen: imagePreview != null,
   });
 
   const presentKinds = useMemo(() => kindsPresent(staged), [staged]);

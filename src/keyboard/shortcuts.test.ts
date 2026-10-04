@@ -5,6 +5,7 @@ import {
   formatChord,
   isTypingTarget,
   matchShortcut,
+  resolveShortcutDispatch,
   type KeyEventLike,
 } from "./shortcuts";
 
@@ -142,6 +143,59 @@ describe("matchShortcut", () => {
     expect(matchShortcut(ev({ key: "o", metaKey: true, altKey: true }), "mac")).toBe(
       null,
     );
+  });
+});
+
+describe("resolveShortcutDispatch", () => {
+  it("runs abortAll only while canAbort and no overlay claims Escape", () => {
+    expect(
+      resolveShortcutDispatch("abortAll", {
+        canAbort: true,
+        helpOpen: false,
+        previewOpen: false,
+      }),
+    ).toBe("run");
+    expect(
+      resolveShortcutDispatch("abortAll", {
+        canAbort: false,
+        helpOpen: false,
+        previewOpen: false,
+      }),
+    ).toBe("ignore");
+  });
+
+  it("closes KEYS on Escape instead of aborting while help is open", () => {
+    expect(
+      resolveShortcutDispatch("abortAll", {
+        canAbort: true,
+        helpOpen: true,
+        previewOpen: false,
+      }),
+    ).toBe("closeHelp");
+    expect(
+      resolveShortcutDispatch("pickFiles", {
+        canAbort: true,
+        helpOpen: true,
+        previewOpen: false,
+      }),
+    ).toBe("ignore");
+  });
+
+  it("ignores Escape abort while image preview is open (preview owns dismiss)", () => {
+    expect(
+      resolveShortcutDispatch("abortAll", {
+        canAbort: true,
+        helpOpen: false,
+        previewOpen: true,
+      }),
+    ).toBe("ignore");
+    expect(
+      resolveShortcutDispatch("startCompress", {
+        canAbort: true,
+        helpOpen: false,
+        previewOpen: true,
+      }),
+    ).toBe("ignore");
   });
 });
 
