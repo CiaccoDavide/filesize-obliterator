@@ -5,9 +5,12 @@
 //! - Preferred file: `Photo.webp` (source stem + sanitized extension)
 //! - Collision policy: if that path already exists, use `Photo_2.webp`, then `Photo_3.webp`, …
 //!   (1-based suffix starting at `_2`; never overwrites an existing file)
+//! - [`prepare_output_path`] atomically reserves the chosen path with `create_new` (O_EXCL)
+//!   so concurrent prepares cannot share a final name
 //! - Never returns the source path; never writes in place.
 
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 /// Directory name created beside the source file's parent.
@@ -89,9 +92,13 @@ where
     unreachable!("u32 range exhausted while resolving output path");
 }
 
-/// Create `<parent>/_compressed` if needed and return a non-colliding output path.
+/// Create `<parent>/_compressed` if needed and atomically reserve a non-colliding output path.
 ///
-/// Errors if the directory cannot be created (e.g. permissions).
+/// Reservation uses `create_new` (O_EXCL): an empty placeholder file is created at the returned
+/// path. Concurrent callers racing the same stem each get a distinct reserved path — if two
+/// prepares pick the same candidate, the loser retries collision resolution.
+///
+/// Errors if the directory cannot be created (e.g. permissions) or the source path would be chosen.
 pub fn prepare_output_path(source_path: &Path, preset_or_ext: &str) -> Result<PathBuf, String> {
     let preferred = preferred_output_path(source_path, preset_or_ext);
     let dir = preferred
@@ -99,11 +106,24 @@ pub fn prepare_output_path(source_path: &Path, preset_or_ext: &str) -> Result<Pa
         .ok_or_else(|| "cannot determine _compressed directory".to_string())?;
     fs::create_dir_all(dir).map_err(|e| format!("cannot create _compressed directory: {e}"))?;
 
-    let path = resolve_output_path_with(source_path, preset_or_ext, |p| p.exists());
-    if path == source_path {
-        return Err("refusing to overwrite source file".into());
+    for _ in 0u32.. {
+        let path = resolve_output_path_with(source_path, preset_or_ext, |p| p.exists());
+        if path == source_path {
+            return Err("refusing to overwrite source file".into());
+        }
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(_file) => return Ok(path),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(format!("cannot reserve output path {}: {e}", path.display()))
+            }
+        }
     }
-    Ok(path)
+    unreachable!("u32 range exhausted while reserving output path");
 }
 
 #[cfg(test)]
@@ -173,13 +193,70 @@ mod tests {
         let first = prepare_output_path(&source, "stub").expect("first");
         assert_eq!(first, root.join("_compressed").join("Holiday.stub"));
         assert!(root.join("_compressed").is_dir());
+        // Atomic reservation leaves an empty placeholder.
+        assert!(first.exists());
+        assert_eq!(fs::metadata(&first).expect("meta").len(), 0);
         fs::write(&first, b"out1").expect("occupy first");
 
         let second = prepare_output_path(&source, "stub").expect("second");
         assert_eq!(second, root.join("_compressed").join("Holiday_2.stub"));
-        assert!(!second.exists());
+        assert!(second.exists());
+        assert_eq!(fs::metadata(&second).expect("meta2").len(), 0);
+        assert_eq!(fs::read(&first).expect("first intact"), b"out1");
 
         let source_bytes = fs::read(&source).expect("read source");
+        assert_eq!(source_bytes, b"src");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn concurrent_prepares_reserve_distinct_paths() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let root = std::env::temp_dir().join(format!(
+            "fo-output-conc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("root");
+        let source = root.join("Race.JPG");
+        {
+            let mut f = fs::File::create(&source).expect("source");
+            f.write_all(b"src").expect("write");
+        }
+
+        const N: usize = 16;
+        let barrier = Arc::new(Barrier::new(N));
+        let source = Arc::new(source);
+        let mut handles = Vec::with_capacity(N);
+
+        for i in 0..N {
+            let barrier = Arc::clone(&barrier);
+            let source = Arc::clone(&source);
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                let path = prepare_output_path(&source, "stub").expect("prepare");
+                // Stamp unique payload so an overwrite would be visible.
+                let marker = format!("job-{i}").into_bytes();
+                fs::write(&path, &marker).expect("stamp");
+                (path, marker)
+            }));
+        }
+
+        let mut seen = HashSet::new();
+        for handle in handles {
+            let (path, marker) = handle.join().expect("thread");
+            assert!(seen.insert(path.clone()), "duplicate reserved path: {}", path.display());
+            assert_eq!(fs::read(&path).expect("read stamp"), marker);
+        }
+        assert_eq!(seen.len(), N);
+
+        let source_bytes = fs::read(source.as_path()).expect("read source");
         assert_eq!(source_bytes, b"src");
 
         let _ = fs::remove_dir_all(&root);
