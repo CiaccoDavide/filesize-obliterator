@@ -57,6 +57,18 @@ Still images are compressed locally with Rust codecs (no cloud APIs). Built-in p
 
 Supported inputs: JPEG, PNG, WebP. **HEIC/HEIF** is not supported in this build (no offline decoder bundled). Outputs land beside the source under `_compressed/`.
 
+### Metadata (`stripMetadata`)
+
+Job option `stripMetadata` (default **true**, HUD: **Strip metadata**):
+
+| Kind | Strip on | Strip off |
+|------|----------|-----------|
+| Image (JPEG) | Bake orientation into pixels; drop EXIF/GPS | Keep EXIF including Orientation (and GPS if present) |
+| Image (WebP out) | Bake orientation; no EXIF written | Bake orientation; container EXIF not preserved |
+| Audio | Re-encode drops tags (always) | Same — tag preserve not available |
+| Video | ffmpeg `-map_metadata -1` | Container metadata may be copied |
+| PDF | Soft **warn** log; no crash (strip not guaranteed) | No change |
+
 ## Audio compression (offline)
 
 Audio is decoded with Symphonia (pure Rust) and re-encoded to MP3 via a vendored LAME build — no cloud APIs and no ffmpeg runtime dependency. Built-in presets:

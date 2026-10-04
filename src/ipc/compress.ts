@@ -15,6 +15,8 @@ export type CompressStartRequest = {
   sourcePath: string;
   mediaKind: MediaKind;
   presetId: string;
+  /** Default true when omitted by older callers — strip EXIF/GPS / container tags. */
+  stripMetadata?: boolean;
 };
 
 /** Mirrored from Rust `compress::presets::PresetInfo`. */
