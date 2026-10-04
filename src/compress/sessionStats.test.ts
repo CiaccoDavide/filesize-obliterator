@@ -3,6 +3,7 @@ import type { ProgressRow } from "./progressState";
 import {
   aggregateSessionStats,
   formatSavePercent,
+  formatSignedBytes,
 } from "./sessionStats";
 
 function row(partial: Partial<ProgressRow> & Pick<ProgressRow, "jobId" | "phase">): ProgressRow {
@@ -138,6 +139,27 @@ describe("aggregateSessionStats", () => {
     expect(stats.bytesOut).toBe(250);
     expect(stats.savePercent).toBe(75);
   });
+
+  it("keeps signed savings when output exceeds input", () => {
+    const stats = aggregateSessionStats([
+      row({
+        jobId: "grow",
+        phase: "COMPLETE",
+        originalBytes: 1000,
+        resultBytes: 1500,
+      }),
+    ]);
+    expect(stats.bytesSaved).toBe(-500);
+    expect(stats.savePercent).toBe(-50);
+  });
+});
+
+describe("formatSignedBytes", () => {
+  it("formats positive and negative aggregates", () => {
+    expect(formatSignedBytes(512)).toBe("512 B");
+    expect(formatSignedBytes(-512)).toBe("-512 B");
+    expect(formatSignedBytes(0)).toBe("0 B");
+  });
 });
 
 describe("formatSavePercent", () => {
@@ -148,6 +170,13 @@ describe("formatSavePercent", () => {
   it("formats compact percentages", () => {
     expect(formatSavePercent(75)).toBe("75%");
     expect(formatSavePercent(12.34)).toBe("12.3%");
+    expect(formatSavePercent(9.4)).toBe("9.4%");
     expect(formatSavePercent(100)).toBe("100%");
+  });
+
+  it("keeps one decimal under 100 for signed values", () => {
+    expect(formatSavePercent(-12.34)).toBe("-12.3%");
+    expect(formatSavePercent(-9.4)).toBe("-9.4%");
+    expect(formatSavePercent(-100)).toBe("-100%");
   });
 });

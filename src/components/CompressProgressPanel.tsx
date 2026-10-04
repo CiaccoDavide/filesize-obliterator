@@ -8,6 +8,7 @@ import {
 import {
   aggregateSessionStats,
   formatSavePercent,
+  formatSignedBytes,
 } from "../compress/sessionStats";
 
 type Props = {
@@ -111,7 +112,7 @@ export function CompressProgressPanel({
           <div className="meter">
             <span className="meter-label">Saved</span>
             <span className="meter-value mono">
-              {formatBytes(Math.max(0, stats.bytesSaved))}
+              {formatSignedBytes(stats.bytesSaved)}
             </span>
           </div>
           <div className="meter">
