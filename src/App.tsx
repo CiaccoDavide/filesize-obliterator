@@ -3,9 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { CompressProgressPanel } from "./components/CompressProgressPanel";
 import { EstimateSummaryStrip } from "./components/EstimateSummaryStrip";
 import { FileDropZone } from "./components/FileDropZone";
+import {
+  ImageComparePreview,
+  type ImageCompareTarget,
+} from "./components/ImageComparePreview";
 import { IntakeStatus } from "./components/IntakeStatus";
 import { PresetPicker } from "./components/PresetPicker";
 import { StagedFileList } from "./components/StagedFileList";
+import type { ProgressRow } from "./compress/progressState";
 import { useCompressEstimate } from "./hooks/useCompressEstimate";
 import { useCompressProgress } from "./hooks/useCompressProgress";
 import { useFileIntake } from "./hooks/useFileIntake";
@@ -47,6 +52,9 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   /** Session privacy control — bound into compress_start as stripMetadata (default on). */
   const [stripMetadata, setStripMetadata] = useState(true);
+  const [imagePreview, setImagePreview] = useState<ImageCompareTarget | null>(
+    null,
+  );
   /** When on, re-encode even if source+preset already has a `_compressed` output. */
   const [forceReencode, setForceReencode] = useState(false);
   const presets = usePresets();
@@ -111,6 +119,17 @@ function App() {
     estimate.clearEstimates();
     presets.setKindPreset(kind, presetId);
     setKindPreset(kind, presetId);
+  }
+
+  function handlePreviewImage(row: ProgressRow) {
+    if (!row.outputPath) return;
+    setImagePreview({
+      jobId: row.jobId,
+      sourcePath: row.sourcePath,
+      outputPath: row.outputPath,
+      originalBytes: row.originalBytes,
+      resultBytes: row.resultBytes,
+    });
   }
 
   function handleClearStaged() {
@@ -247,6 +266,7 @@ function App() {
             onAbort={() => void compress.abortAll()}
             onCancelOne={(jobId) => void compress.cancelOne(jobId)}
             onClearFinished={compress.clearFinished}
+            onPreviewImage={handlePreviewImage}
             onReveal={(action, targets) => void handleReveal(action, targets)}
           />
 
@@ -275,6 +295,12 @@ function App() {
           </div>
         </section>
       </main>
+      {imagePreview ? (
+        <ImageComparePreview
+          target={imagePreview}
+          onClose={() => setImagePreview(null)}
+        />
+      ) : null}
     </div>
   );
 }

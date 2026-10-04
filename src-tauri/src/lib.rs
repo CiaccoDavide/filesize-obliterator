@@ -1,11 +1,13 @@
 mod compress;
 mod intake;
+mod preview;
 
 use compress::{
     compress_cancel, compress_estimate, compress_list, compress_list_presets, compress_start,
     JobManager,
 };
 use intake::intake_resolve;
+use preview::{preview_allow_assets, preview_revoke_assets, PreviewGrantState};
 use serde::Serialize;
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -34,6 +36,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(JobManager::default())
+        .manage(PreviewGrantState::default())
         .invoke_handler(tauri::generate_handler![
             ping,
             app_info,
@@ -42,7 +45,9 @@ pub fn run() {
             compress_list,
             compress_list_presets,
             compress_estimate,
-            intake_resolve
+            intake_resolve,
+            preview_allow_assets,
+            preview_revoke_assets
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

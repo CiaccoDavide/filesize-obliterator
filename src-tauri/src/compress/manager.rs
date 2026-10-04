@@ -293,6 +293,38 @@ impl JobManager {
         Ok(jobs)
     }
 
+    /// Source + output paths for a completed image job (preview grant validation).
+    pub fn completed_image_preview_paths(
+        &self,
+        job_id: &str,
+    ) -> Result<(PathBuf, PathBuf), String> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| "job manager lock poisoned".to_string())?;
+        let record = guard
+            .jobs
+            .get(job_id)
+            .ok_or_else(|| "job not found".to_string())?;
+        let info = &record.info;
+        if info.media_kind != MediaKind::Image {
+            return Err("preview requires an image job".into());
+        }
+        if info.status != JobStatus::Completed {
+            return Err("preview requires a completed job".into());
+        }
+        if info.source_path.trim().is_empty() {
+            return Err("preview requires a source path".into());
+        }
+        let output = info
+            .output_path
+            .as_ref()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| "preview requires an output path".to_string())?;
+        Ok((PathBuf::from(&info.source_path), PathBuf::from(output)))
+    }
+
     fn with_job<F, T>(&self, job_id: &str, f: F) -> Result<T, String>
     where
         F: FnOnce(&mut JobRecord) -> Result<T, String>,
@@ -839,6 +871,87 @@ mod tests {
         assert!(strip_unsupported_warning(&MediaKind::Image, true).is_none());
         assert!(strip_unsupported_warning(&MediaKind::Audio, true).is_none());
         assert!(strip_unsupported_warning(&MediaKind::Video, true).is_none());
+    }
+
+    #[test]
+    fn completed_image_preview_paths_requires_complete_image() {
+        let manager = JobManager::default();
+        let source = temp_source("preview-src.png", b"png");
+        let output = temp_source("preview-out.jpg", b"jpg");
+        let mut guard = manager.inner.lock().unwrap();
+        guard.jobs.insert(
+            "job-img".into(),
+            JobRecord {
+                info: JobInfo {
+                    id: "job-img".into(),
+                    source_path: source.to_string_lossy().into_owned(),
+                    media_kind: MediaKind::Image,
+                    preset_id: "image-balanced".into(),
+                    status: JobStatus::Completed,
+                    percent: 100.0,
+                    error: None,
+                    output_path: Some(output.to_string_lossy().into_owned()),
+                    original_bytes: Some(3),
+                    result_bytes: Some(2),
+                    duration_ms: Some(1),
+                },
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        guard.jobs.insert(
+            "job-vid".into(),
+            JobRecord {
+                info: JobInfo {
+                    id: "job-vid".into(),
+                    source_path: source.to_string_lossy().into_owned(),
+                    media_kind: MediaKind::Video,
+                    preset_id: "video-balanced".into(),
+                    status: JobStatus::Completed,
+                    percent: 100.0,
+                    error: None,
+                    output_path: Some(output.to_string_lossy().into_owned()),
+                    original_bytes: Some(3),
+                    result_bytes: Some(2),
+                    duration_ms: Some(1),
+                },
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        guard.jobs.insert(
+            "job-run".into(),
+            JobRecord {
+                info: JobInfo {
+                    id: "job-run".into(),
+                    source_path: source.to_string_lossy().into_owned(),
+                    media_kind: MediaKind::Image,
+                    preset_id: "image-balanced".into(),
+                    status: JobStatus::Running,
+                    percent: 10.0,
+                    error: None,
+                    output_path: None,
+                    original_bytes: Some(3),
+                    result_bytes: None,
+                    duration_ms: None,
+                },
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        drop(guard);
+
+        let (src, out) = manager
+            .completed_image_preview_paths("job-img")
+            .expect("completed image");
+        assert_eq!(src, source);
+        assert_eq!(out, output);
+        assert!(manager
+            .completed_image_preview_paths("job-vid")
+            .unwrap_err()
+            .contains("image"));
+        assert!(manager
+            .completed_image_preview_paths("job-run")
+            .unwrap_err()
+            .contains("completed"));
+        assert!(manager.completed_image_preview_paths("missing").is_err());
     }
 
     #[test]
