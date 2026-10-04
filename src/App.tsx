@@ -2,9 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { CompressProgressPanel } from "./components/CompressProgressPanel";
 import { FileDropZone } from "./components/FileDropZone";
+import {
+  ImageComparePreview,
+  type ImageCompareTarget,
+} from "./components/ImageComparePreview";
 import { IntakeStatus } from "./components/IntakeStatus";
 import { PresetPicker } from "./components/PresetPicker";
 import { StagedFileList } from "./components/StagedFileList";
+import type { ProgressRow } from "./compress/progressState";
 import { useCompressProgress } from "./hooks/useCompressProgress";
 import { useFileIntake } from "./hooks/useFileIntake";
 import { usePresets } from "./hooks/usePresets";
@@ -41,6 +46,9 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   /** Session privacy control — bound into compress_start as stripMetadata (default on). */
   const [stripMetadata, setStripMetadata] = useState(true);
+  const [imagePreview, setImagePreview] = useState<ImageCompareTarget | null>(
+    null,
+  );
   const presets = usePresets();
   const {
     staged,
@@ -89,6 +97,16 @@ function App() {
   function handlePresetSelect(kind: MediaKind, presetId: string) {
     presets.setKindPreset(kind, presetId);
     setKindPreset(kind, presetId);
+  }
+
+  function handlePreviewImage(row: ProgressRow) {
+    if (!row.outputPath) return;
+    setImagePreview({
+      sourcePath: row.sourcePath,
+      outputPath: row.outputPath,
+      originalBytes: row.originalBytes,
+      resultBytes: row.resultBytes,
+    });
   }
 
   return (
@@ -173,6 +191,7 @@ function App() {
             onAbort={() => void compress.abortAll()}
             onCancelOne={(jobId) => void compress.cancelOne(jobId)}
             onClearFinished={compress.clearFinished}
+            onPreviewImage={handlePreviewImage}
           />
 
           <div className="hud-frame setup-surface">
@@ -200,6 +219,12 @@ function App() {
           </div>
         </section>
       </main>
+      {imagePreview ? (
+        <ImageComparePreview
+          target={imagePreview}
+          onClose={() => setImagePreview(null)}
+        />
+      ) : null}
     </div>
   );
 }
