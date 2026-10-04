@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   aggregateEstimates,
+  estimateForStagedFile,
   formatEstimateDeltaPercent,
   formatEstimatedBytes,
   type EstimateItem,
@@ -15,6 +16,27 @@ function item(partial: Partial<EstimateItem> & Pick<EstimateItem, "path">): Esti
     ...partial,
   };
 }
+
+describe("estimateForStagedFile", () => {
+  it("requires matching path and presetId", () => {
+    const byPath = new Map<string, EstimateItem>([
+      ["/a.jpg", item({ path: "/a.jpg", presetId: "image-balanced", estimatedBytes: 100 })],
+    ]);
+    expect(
+      estimateForStagedFile(byPath, { path: "/a.jpg", presetId: "image-balanced" })
+        ?.estimatedBytes,
+    ).toBe(100);
+    expect(
+      estimateForStagedFile(byPath, { path: "/a.jpg", presetId: "image-small" }),
+    ).toBeUndefined();
+    expect(
+      estimateForStagedFile(byPath, { path: "/b.jpg", presetId: "image-balanced" }),
+    ).toBeUndefined();
+    expect(
+      estimateForStagedFile(undefined, { path: "/a.jpg", presetId: "image-balanced" }),
+    ).toBeUndefined();
+  });
+});
 
 describe("aggregateEstimates", () => {
   it("starts empty", () => {

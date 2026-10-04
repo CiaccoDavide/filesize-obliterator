@@ -23,6 +23,19 @@ export type EstimateAggregate = {
   count: number;
 };
 
+/**
+ * Join a PREVIEW row to a staged file only when both path and presetId match.
+ * Path-only lookup would show stale sizes after a preset change until clear.
+ */
+export function estimateForStagedFile(
+  estimatesByPath: Map<string, EstimateItem> | undefined,
+  file: { path: string; presetId: string },
+): EstimateItem | undefined {
+  const est = estimatesByPath?.get(file.path);
+  if (!est || est.presetId !== file.presetId) return undefined;
+  return est;
+}
+
 /** Aggregate staged → estimated → Δ% for the PREVIEW summary strip. */
 export function aggregateEstimates(items: EstimateItem[]): EstimateAggregate {
   let stagedBytes = 0;

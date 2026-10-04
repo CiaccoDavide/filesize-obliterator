@@ -107,6 +107,8 @@ function App() {
   }, []);
 
   function handlePresetSelect(kind: MediaKind, presetId: string) {
+    // Clear before paint so summary/rows never briefly show the prior preset.
+    estimate.clearEstimates();
     presets.setKindPreset(kind, presetId);
     setKindPreset(kind, presetId);
   }

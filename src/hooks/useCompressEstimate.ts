@@ -55,7 +55,9 @@ export function useCompressEstimate() {
 
     setEstimating(true);
     setError(null);
-    const partial: EstimateItem[] = [];
+    // Drop any prior PREVIEW so a mid-batch failure cannot leave a partial
+    // selection that misrepresents aggregate staged → estimated totals.
+    setItems([]);
     try {
       const next = await runEstimatePreview(
         ready.map((f) => ({
@@ -69,15 +71,13 @@ export function useCompressEstimate() {
             mediaKind: file.mediaKind,
             presetId: file.presetId,
           });
-          const item: EstimateItem = {
+          return {
             path: result.path,
             presetId: result.presetId,
             estimatedBytes: result.estimatedBytes,
             confidence: result.confidence,
             originalBytes: result.originalBytes,
           };
-          partial.push(item);
-          return item;
         },
         isCurrent,
       );
@@ -85,7 +85,7 @@ export function useCompressEstimate() {
       setItems(next);
     } catch (err: unknown) {
       if (!isCurrent()) return;
-      setItems(partial);
+      setItems([]);
       setError(errorMessage(err));
     } finally {
       if (isCurrent()) setEstimating(false);

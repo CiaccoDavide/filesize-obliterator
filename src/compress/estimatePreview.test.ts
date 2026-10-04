@@ -52,4 +52,26 @@ describe("runEstimatePreview", () => {
     );
     expect(result).toEqual([item("/a.jpg", "image-balanced")]);
   });
+
+  it("rejects mid-batch estimate failures without returning partial items", async () => {
+    const gate = createBatchAdmissionController();
+    const token = gate.begin();
+    const estimateOne = vi.fn(async (file: { path: string; presetId: string }) => {
+      if (file.path === "/b.jpg") throw new Error("probe failed");
+      return item(file.path, file.presetId);
+    });
+
+    await expect(
+      runEstimatePreview(
+        [
+          { path: "/a.jpg", mediaKind: "image", presetId: "image-balanced" },
+          { path: "/b.jpg", mediaKind: "image", presetId: "image-balanced" },
+        ],
+        estimateOne,
+        () => gate.isCurrent(token),
+      ),
+    ).rejects.toThrow("probe failed");
+
+    expect(estimateOne).toHaveBeenCalledTimes(2);
+  });
 });

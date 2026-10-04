@@ -1,4 +1,7 @@
-import { formatEstimatedBytes } from "../compress/estimateAggregate";
+import {
+  estimateForStagedFile,
+  formatEstimatedBytes,
+} from "../compress/estimateAggregate";
 import type { EstimateItem } from "../compress/estimateAggregate";
 import { formatBytes } from "../intake/formatBytes";
 import type { StagedFile } from "../intake/types";
@@ -21,7 +24,7 @@ export function StagedFileList({ files, estimatesByPath, onReveal }: Props) {
   return (
     <ul className="staged-list">
       {files.map((file) => {
-        const est = estimatesByPath?.get(file.path);
+        const est = estimateForStagedFile(estimatesByPath, file);
         return (
           <li
             key={file.id}
