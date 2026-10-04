@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { CompressProgressPanel } from "./components/CompressProgressPanel";
 import { FileDropZone } from "./components/FileDropZone";
 import { IntakeStatus } from "./components/IntakeStatus";
 import { StagedFileList } from "./components/StagedFileList";
+import { useCompressProgress } from "./hooks/useCompressProgress";
 import { useFileIntake } from "./hooks/useFileIntake";
 import "./App.css";
 
@@ -26,6 +28,7 @@ function App() {
   const [pingResult, setPingResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { staged, status, dragActive, pickFiles, clearStaged } = useFileIntake();
+  const compress = useCompressProgress();
 
   useEffect(() => {
     let cancelled = false;
@@ -80,6 +83,19 @@ function App() {
               <StagedFileList files={staged} />
             </div>
           </FileDropZone>
+
+          <CompressProgressPanel
+            rows={compress.rows}
+            phase={compress.phase}
+            error={compress.error}
+            starting={compress.starting}
+            canAbort={compress.canAbort}
+            aborting={compress.aborting}
+            stagedCount={staged.length}
+            onStart={() => void compress.startStaged(staged)}
+            onAbort={() => void compress.abortAll()}
+            onClearFinished={compress.clearFinished}
+          />
 
           <div className="hud-frame setup-surface">
             <p className="panel-label">Bridge</p>
