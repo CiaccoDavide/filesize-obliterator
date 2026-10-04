@@ -28,6 +28,8 @@ export type AppSettings = {
   windowSize: WindowSize | null;
   /** True after the operator ACKs the first-run briefing overlay. */
   briefingSeen: boolean;
+  /** Show a local OS notification when a batch finishes while unfocused. */
+  notifyOnComplete: boolean;
 };
 
 const KIND_SET = new Set<MediaKind>(["image", "audio", "video", "pdf"]);
@@ -44,6 +46,7 @@ export function defaultSettings(): AppSettings {
     uiDensity: "compact",
     windowSize: null,
     briefingSeen: false,
+    notifyOnComplete: true,
   };
 }
 
@@ -128,6 +131,10 @@ export function parseSettings(raw: unknown): AppSettings {
       typeof obj.briefingSeen === "boolean"
         ? obj.briefingSeen
         : defaults.briefingSeen,
+    notifyOnComplete:
+      typeof obj.notifyOnComplete === "boolean"
+        ? obj.notifyOnComplete
+        : defaults.notifyOnComplete,
   };
 }
 

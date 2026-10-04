@@ -26,6 +26,7 @@ webp = "0.3"
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "wav", "flac", "aac", "isomp4", "pcm"] }
 mp3lame-encoder = "0.2"
 tauri-plugin-opener = "2.7.0"
+tauri-plugin-notification = "2.5.1"
 # Video: local ffmpeg sidecar / PATH (resolved at runtime; see compress::video_encode).
 # PDF: local Ghostscript sidecar / PATH (resolved at runtime; see compress::pdf_encode).
 

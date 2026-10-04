@@ -13,6 +13,7 @@ type Props = {
   onConcurrency: (n: number) => void;
   onStripMetadata: (on: boolean) => void;
   onPreferHardware: (on: boolean) => void;
+  onNotifyOnComplete: (on: boolean) => void;
   onUiDensity: (density: UiDensity) => void;
 };
 
@@ -23,6 +24,7 @@ export function SettingsPanel({
   onConcurrency,
   onStripMetadata,
   onPreferHardware,
+  onNotifyOnComplete,
   onUiDensity,
 }: Props) {
   return (
@@ -88,6 +90,24 @@ export function SettingsPanel({
           {hwStatus}
         </p>
       ) : null}
+
+      <label className="hud-toggle">
+        <input
+          type="checkbox"
+          checked={settings.notifyOnComplete}
+          disabled={disabled}
+          onChange={(e) => onNotifyOnComplete(e.target.checked)}
+        />
+        <span className="hud-toggle-label">Notify on complete</span>
+        <span className="mono hud-toggle-state">
+          {settings.notifyOnComplete ? "ON" : "OFF"}
+        </span>
+      </label>
+      <p className="hud-toggle-hint">
+        {settings.notifyOnComplete
+          ? "Local OS notification when a batch finishes while this window is unfocused."
+          : "No OS notifications when a batch finishes."}
+      </p>
 
       <div className="settings-density" role="group" aria-label="UI density">
         <p className="hud-toggle-label">Density</p>

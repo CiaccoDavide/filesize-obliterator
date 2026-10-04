@@ -24,6 +24,7 @@ export type LocalSettingsApi = {
   setConcurrency: (n: number) => void;
   setStripMetadata: (on: boolean) => void;
   setPreferHardware: (on: boolean) => void;
+  setNotifyOnComplete: (on: boolean) => void;
   setUiDensity: (density: UiDensity) => void;
   setDefaultPreset: (kind: MediaKind, presetId: string) => void;
   patch: (partial: Partial<AppSettings>) => void;
@@ -257,6 +258,13 @@ export function useLocalSettings(): LocalSettingsApi {
     [commit],
   );
 
+  const setNotifyOnComplete = useCallback(
+    (on: boolean) => {
+      commit((prev) => ({ ...prev, notifyOnComplete: on }));
+    },
+    [commit],
+  );
+
   const setUiDensity = useCallback(
     (density: UiDensity) => {
       commit((prev) => ({ ...prev, uiDensity: density }));
@@ -288,6 +296,7 @@ export function useLocalSettings(): LocalSettingsApi {
     setConcurrency,
     setStripMetadata,
     setPreferHardware,
+    setNotifyOnComplete,
     setUiDensity,
     setDefaultPreset,
     patch,

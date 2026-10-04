@@ -50,6 +50,10 @@ fn default_briefing_seen() -> bool {
     false
 }
 
+fn default_notify_on_complete() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -71,6 +75,9 @@ pub struct AppSettings {
     /// True after the operator ACKs the first-run briefing overlay.
     #[serde(default = "default_briefing_seen")]
     pub briefing_seen: bool,
+    /// Local OS notification when a batch finishes while the window is unfocused.
+    #[serde(default = "default_notify_on_complete")]
+    pub notify_on_complete: bool,
 }
 
 fn default_settings_version() -> u32 {
@@ -92,6 +99,7 @@ impl Default for AppSettings {
             ui_density: "compact".into(),
             window_size: None,
             briefing_seen: false,
+            notify_on_complete: true,
         }
     }
 }
@@ -246,7 +254,8 @@ mod tests {
             "preferHardware": false,
             "uiDensity": "regular",
             "windowSize": { "width": 960, "height": 720 },
-            "briefingSeen": true
+            "briefingSeen": true,
+            "notifyOnComplete": false
         }"#;
         let parsed = parse_settings_str(raw);
         assert_eq!(parsed.concurrency, 1);
@@ -263,6 +272,7 @@ mod tests {
             })
         );
         assert!(parsed.briefing_seen);
+        assert!(!parsed.notify_on_complete);
     }
 
     #[test]
@@ -279,6 +289,14 @@ mod tests {
             r#"{"version":1,"concurrency":2,"stripMetadata":true,"uiDensity":"compact"}"#,
         );
         assert!(parsed.prefer_hardware);
+    }
+
+    #[test]
+    fn missing_notify_on_complete_defaults_true() {
+        let parsed = parse_settings_str(
+            r#"{"version":1,"concurrency":2,"stripMetadata":true,"uiDensity":"compact"}"#,
+        );
+        assert!(parsed.notify_on_complete);
     }
 
     #[test]
@@ -310,6 +328,7 @@ mod tests {
         assert!(d.prefer_hardware);
         assert!(d.window_size.is_none());
         assert!(!d.briefing_seen);
+        assert!(d.notify_on_complete);
     }
 
     #[test]
