@@ -43,4 +43,26 @@ describe("FileDropZone", () => {
     });
     expect(onPick).toHaveBeenCalledTimes(1);
   });
+
+  it("exposes WATCH toggle that reports pressed while watching", () => {
+    const onToggle = vi.fn();
+    render(
+      <FileDropZone
+        dragActive={false}
+        onPick={() => {}}
+        watching
+        onToggleWatch={onToggle}
+      />,
+    );
+    const watchBtn = host.querySelector<HTMLButtonElement>(
+      '[data-testid="watch-toggle"]',
+    );
+    expect(watchBtn).not.toBeNull();
+    expect(watchBtn!.getAttribute("aria-pressed")).toBe("true");
+    expect(watchBtn!.textContent).toBe("WATCHING");
+    act(() => {
+      watchBtn!.click();
+    });
+    expect(onToggle).toHaveBeenCalledTimes(1);
+  });
 });

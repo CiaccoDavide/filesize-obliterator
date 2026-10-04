@@ -2,6 +2,7 @@ mod compress;
 mod intake;
 mod preview;
 mod settings;
+mod watch;
 
 use compress::{
     compress_cancel, compress_estimate, compress_hw_encode_status, compress_list,
@@ -11,6 +12,7 @@ use intake::intake_resolve;
 use preview::{preview_allow_assets, preview_revoke_assets, PreviewGrantState};
 use serde::Serialize;
 use settings::{settings_load, settings_save, settings_set_concurrency};
+use watch::{watch_start, watch_status, watch_stop, WatchState};
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -40,6 +42,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(JobManager::default())
         .manage(PreviewGrantState::default())
+        .manage(WatchState::default())
         .invoke_handler(tauri::generate_handler![
             ping,
             app_info,
@@ -54,7 +57,10 @@ pub fn run() {
             preview_revoke_assets,
             settings_load,
             settings_save,
-            settings_set_concurrency
+            settings_set_concurrency,
+            watch_start,
+            watch_stop,
+            watch_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

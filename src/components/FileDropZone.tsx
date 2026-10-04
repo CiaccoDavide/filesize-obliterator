@@ -3,6 +3,9 @@ import { forwardRef, type ReactNode } from "react";
 type Props = {
   dragActive: boolean;
   onPick: () => void;
+  /** Offline folder watch toggle (session-local). */
+  watching?: boolean;
+  onToggleWatch?: () => void;
   children?: ReactNode;
 };
 
@@ -11,7 +14,10 @@ type Props = {
  * SR users get a real control and tab order is not polluted by a faux widget.
  */
 export const FileDropZone = forwardRef<HTMLDivElement, Props>(
-  function FileDropZone({ dragActive, onPick, children }, ref) {
+  function FileDropZone(
+    { dragActive, onPick, watching = false, onToggleWatch, children },
+    ref,
+  ) {
     return (
       <div
         ref={ref}
@@ -37,6 +43,18 @@ export const FileDropZone = forwardRef<HTMLDivElement, Props>(
           >
             Browse
           </button>
+          {onToggleWatch ? (
+            <button
+              type="button"
+              className={`btn${watching ? " primary" : ""}`}
+              onClick={onToggleWatch}
+              aria-label={watching ? "Stop folder watch" : "Watch folder"}
+              aria-pressed={watching}
+              data-testid="watch-toggle"
+            >
+              {watching ? "WATCHING" : "WATCH"}
+            </button>
+          ) : null}
         </div>
         {children}
       </div>

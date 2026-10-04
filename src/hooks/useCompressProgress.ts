@@ -371,6 +371,54 @@ export function useCompressProgress() {
     [admitTargets],
   );
 
+  /**
+   * Additive enqueue for watch-folder ready files — does not reset the batch
+   * or clear existing HUD rows (unlike startStaged / admitTargets).
+   */
+  const enqueueWatchFiles = useCallback(
+    async (files: StagedFile[], options?: StartStagedOptions) => {
+      if (options) {
+        lastOptionsRef.current = { ...lastOptionsRef.current, ...options };
+      }
+      const opts = lastOptionsRef.current;
+      for (const file of files) {
+        if (!file.presetId) continue;
+        const kind = asMediaKind(file.kind);
+        if (!kind) continue;
+        try {
+          const job = await compressStart({
+            sourcePath: file.path,
+            mediaKind: kind,
+            presetId: file.presetId,
+            stripMetadata: opts.stripMetadata,
+            preferHardware: opts.preferHardware,
+            force: opts.force,
+          });
+          admittedIdsRef.current.add(job.id);
+          touchActivity(job.id);
+          setRows((prev) => upsertJob(prev, job));
+          setError(null);
+        } catch (err: unknown) {
+          const message = errorMessage(err);
+          setError(message);
+          setRows((prev) => [
+            ...prev,
+            {
+              jobId: `watch-failed:${file.path}:${Date.now()}`,
+              sourcePath: file.path,
+              mediaKind: kind,
+              presetId: file.presetId,
+              phase: "FAILED",
+              percent: 0,
+              error: message,
+            },
+          ]);
+        }
+      }
+    },
+    [touchActivity],
+  );
+
   const retryFailed = useCallback(async () => {
     const candidates = failedRowsForRetry(rowsRef.current);
     const targets: AdmitTarget[] = [];
@@ -514,6 +562,7 @@ export function useCompressProgress() {
     canRetryFailed,
     canDismissFailed,
     startStaged,
+    enqueueWatchFiles,
     retryFailed,
     dismissFailed,
     abortAll,

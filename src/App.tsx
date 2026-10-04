@@ -22,8 +22,11 @@ import { useCompressProgress } from "./hooks/useCompressProgress";
 import { useFileIntake } from "./hooks/useFileIntake";
 import { useLocalSettings } from "./hooks/useLocalSettings";
 import { usePresets } from "./hooks/usePresets";
+import { useWatchFolder } from "./hooks/useWatchFolder";
 import { compressHwEncodeStatus, type MediaKind } from "./ipc/compress";
 import { revealInFileManager } from "./ipc/reveal";
+import { detectKind } from "./intake/kinds";
+import type { StagedFile } from "./intake/types";
 import { useKeyboardShortcuts } from "./keyboard/useKeyboardShortcuts";
 import type { RevealAction } from "./reveal/actions";
 import { kindsPresent } from "./presets/selection";
@@ -43,7 +46,9 @@ function statusTone(status: string): "ok" | "warn" | "danger" {
   if (
     status.startsWith("REJECTED") ||
     status.startsWith("INTAKE FAILED") ||
-    status.startsWith("PICK FAILED")
+    status.startsWith("PICK FAILED") ||
+    status.startsWith("WATCH FAILED") ||
+    status.startsWith("WATCH PICK FAILED")
   ) {
     return "danger";
   }
@@ -97,6 +102,45 @@ function App() {
     rows: compress.rows,
   });
 
+  const handleWatchReady = useCallback(
+    (file: { path: string; bytes: number }) => {
+      const kind = detectKind(file.path);
+      if (kind === "unsupported") return;
+      const presetId = presets.presetByKind[kind];
+      if (!presetId) {
+        setStatus("WATCH FAILED — no default preset");
+        return;
+      }
+      const stagedFile: StagedFile = {
+        id: `watch:${file.path}`,
+        path: file.path,
+        name: file.path.split(/[/\\]/).pop() ?? file.path,
+        bytes: file.bytes,
+        kind,
+        presetId,
+        status: "staged",
+      };
+      void compress.enqueueWatchFiles([stagedFile], {
+        stripMetadata: local.settings.stripMetadata,
+        preferHardware: local.settings.preferHardware,
+        force: forceReencode,
+      });
+    },
+    [
+      compress,
+      presets.presetByKind,
+      local.settings.stripMetadata,
+      local.settings.preferHardware,
+      forceReencode,
+      setStatus,
+    ],
+  );
+
+  const watch = useWatchFolder({
+    onReady: handleWatchReady,
+    includeExisting: false,
+  });
+
   const shellMode = useMemo(
     () =>
       deriveShellMode({
@@ -105,6 +149,9 @@ function App() {
       }),
     [staged.length, compress.phase],
   );
+
+  const displayStatus =
+    watch.error ?? watch.hudStatus ?? status;
 
   const focusDropZone = useCallback(() => {
     const zone = dropZoneRef.current;
@@ -392,7 +439,7 @@ function App() {
         <section className="setup" data-mode={shellMode}>
           <header className="hud-frame setup-header">
             <p className="brand-mark">Filesize Obliterator</p>
-            {shellMode === "idle" ? (
+            {shellMode === "idle" && !watch.watching ? (
               <>
                 <h1 className="brand-tagline">Local media compression.</h1>
                 <p className="brand-sub">
@@ -401,7 +448,9 @@ function App() {
               </>
             ) : (
               <p className="mode-chip mono" aria-live="polite">
-                {shellMode.toUpperCase()}
+                {watch.watching && shellMode === "idle"
+                  ? "WATCHING"
+                  : shellMode.toUpperCase()}
               </p>
             )}
             <p className="keys-hint mono">
@@ -426,8 +475,13 @@ function App() {
             ref={dropZoneRef}
             dragActive={dragActive}
             onPick={() => void pickFiles()}
+            watching={watch.watching}
+            onToggleWatch={() => void watch.toggle()}
           >
-            <IntakeStatus status={status} tone={statusTone(status)} />
+            <IntakeStatus
+              status={displayStatus}
+              tone={statusTone(displayStatus)}
+            />
           </FileDropZone>
 
           {opsPrimary}
