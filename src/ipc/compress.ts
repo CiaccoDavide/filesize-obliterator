@@ -9,7 +9,8 @@ export type JobStatus =
   | "running"
   | "completed"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "skipped";
 
 export type CompressStartRequest = {
   sourcePath: string;
@@ -17,6 +18,27 @@ export type CompressStartRequest = {
   presetId: string;
   /** Default true when omitted by older callers — strip EXIF/GPS / container tags. */
   stripMetadata?: boolean;
+  /** Default false — skip when an output already exists for this source+preset. */
+  force?: boolean;
+};
+
+/** Mirrored from Rust `compress::estimate::EstimateConfidence`. */
+export type EstimateConfidence = "exact" | "approximate";
+
+/** Mirrored from Rust `compress::estimate::CompressEstimateRequest`. */
+export type CompressEstimateRequest = {
+  sourcePath: string;
+  mediaKind: MediaKind;
+  presetId: string;
+};
+
+/** Mirrored from Rust `compress::estimate::CompressEstimateResult`. */
+export type CompressEstimateResult = {
+  path: string;
+  presetId: string;
+  estimatedBytes: number;
+  confidence: EstimateConfidence;
+  originalBytes: number;
 };
 
 /** Mirrored from Rust `compress::presets::PresetInfo`. */
@@ -91,6 +113,13 @@ export function compressCancel(jobId: string): Promise<JobInfo> {
 
 export function compressList(): Promise<JobInfo[]> {
   return invoke<JobInfo[]>("compress_list");
+}
+
+/** Dry-run size estimate — never writes `_compressed` outputs. */
+export function compressEstimate(
+  request: CompressEstimateRequest,
+): Promise<CompressEstimateResult> {
+  return invoke<CompressEstimateResult>("compress_estimate", { request });
 }
 
 export function listenCompressEvents(

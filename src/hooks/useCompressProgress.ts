@@ -22,6 +22,7 @@ import type { StagedFile } from "../intake/types";
 
 export type StartStagedOptions = {
   stripMetadata?: boolean;
+  force?: boolean;
 };
 
 function cancelableActiveIds(rows: ProgressRow[]): string[] {
@@ -98,6 +99,7 @@ export function useCompressProgress() {
               mediaKind: file.kind,
               presetId: file.presetId,
               stripMetadata: options?.stripMetadata,
+              force: options?.force,
             }),
           onAdmitted: (job) => {
             admittedIdsRef.current.add(job.id);
@@ -169,6 +171,7 @@ export function useCompressProgress() {
       !row ||
       row.phase === "COMPLETE" ||
       row.phase === "FAILED" ||
+      row.phase === "SKIPPED" ||
       row.phase === "ABORTING"
     ) {
       return;
@@ -188,7 +191,10 @@ export function useCompressProgress() {
   const clearFinished = useCallback(() => {
     setRows((prev) =>
       prev.filter(
-        (r) => r.phase !== "COMPLETE" && r.phase !== "FAILED",
+        (r) =>
+          r.phase !== "COMPLETE" &&
+          r.phase !== "FAILED" &&
+          r.phase !== "SKIPPED",
       ),
     );
   }, []);

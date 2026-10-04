@@ -44,6 +44,7 @@ describe("jobStatusToPhase", () => {
     expect(jobStatusToPhase("completed")).toBe("COMPLETE");
     expect(jobStatusToPhase("failed")).toBe("FAILED");
     expect(jobStatusToPhase("cancelled")).toBe("FAILED");
+    expect(jobStatusToPhase("skipped")).toBe("SKIPPED");
   });
 });
 
@@ -222,6 +223,16 @@ describe("markAborting + deriveOpsPhase", () => {
 
   it("derives COMPLETE when all rows complete", () => {
     expect(deriveOpsPhase([row({ phase: "COMPLETE" })])).toBe("COMPLETE");
+  });
+
+  it("derives SKIPPED when finished rows are only skips", () => {
+    expect(deriveOpsPhase([row({ phase: "SKIPPED" })])).toBe("SKIPPED");
+    expect(
+      deriveOpsPhase([
+        row({ phase: "SKIPPED" }),
+        row({ jobId: "job-2", phase: "COMPLETE" }),
+      ]),
+    ).toBe("COMPLETE");
   });
 
   it("derives AWAITING with no rows", () => {

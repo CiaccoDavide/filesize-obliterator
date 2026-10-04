@@ -11,6 +11,8 @@ import {
   formatSignedBytes,
 } from "../compress/sessionStats";
 import { isImagePreviewable } from "../preview/imagePreview";
+import type { RevealAction } from "../reveal/actions";
+import { RevealRowActions } from "./RevealRowActions";
 
 type Props = {
   rows: ProgressRow[];
@@ -20,11 +22,17 @@ type Props = {
   canAbort: boolean;
   aborting: boolean;
   stagedCount: number;
+  estimating?: boolean;
   onStart: () => void;
+  onPreview?: () => void;
   onAbort: () => void;
   onCancelOne: (jobId: string) => void;
   onClearFinished: () => void;
   onPreviewImage?: (row: ProgressRow) => void;
+  onReveal?: (
+    action: RevealAction,
+    targets: { sourcePath: string; outputPath?: string },
+  ) => void;
 };
 
 function rowCancellable(row: ProgressRow): boolean {
@@ -36,7 +44,7 @@ function rowCancellable(row: ProgressRow): boolean {
 
 function phaseTone(phase: OpsPhase): "ok" | "warn" | "danger" {
   if (phase === "FAILED") return "danger";
-  if (phase === "ABORTING") return "warn";
+  if (phase === "ABORTING" || phase === "SKIPPED") return "warn";
   return "ok";
 }
 
@@ -49,6 +57,11 @@ function rowDetail(row: ProgressRow): string {
     );
     const out = row.outputPath ?? "—";
     return delta ? `${out} · ${delta}` : out;
+  }
+  if (row.phase === "SKIPPED") {
+    const reason = row.error ?? "already compressed for this preset";
+    const out = row.outputPath ? ` · ${row.outputPath}` : "";
+    return `${reason}${out}`;
   }
   if (row.phase === "FAILED" && row.error) {
     return row.error;
@@ -64,15 +77,19 @@ export function CompressProgressPanel({
   canAbort,
   aborting,
   stagedCount,
+  estimating = false,
   onStart,
+  onPreview,
   onAbort,
   onCancelOne,
   onClearFinished,
   onPreviewImage,
+  onReveal,
 }: Props) {
   const tone = phaseTone(phase);
   const stats = aggregateSessionStats(rows);
-  const hasFinished = stats.filesDone + stats.filesFailed > 0;
+  const hasFinished =
+    stats.filesDone + stats.filesFailed + stats.filesSkipped > 0;
 
   return (
     <section className="hud-frame compress-panel" aria-label="Compress progress">
@@ -105,6 +122,10 @@ export function CompressProgressPanel({
             <span className="meter-value mono">{stats.filesFailed}</span>
           </div>
           <div className="meter">
+            <span className="meter-label">Skip</span>
+            <span className="meter-value mono">{stats.filesSkipped}</span>
+          </div>
+          <div className="meter">
             <span className="meter-label">In</span>
             <span className="meter-value mono">{formatBytes(stats.bytesIn)}</span>
           </div>
@@ -127,6 +148,18 @@ export function CompressProgressPanel({
         </div>
 
         <div className="compress-actions">
+          {onPreview ? (
+            <button
+              type="button"
+              className="btn"
+              disabled={
+                estimating || starting || stagedCount === 0 || canAbort
+              }
+              onClick={onPreview}
+            >
+              {estimating ? "ESTIMATING" : "PREVIEW"}
+            </button>
+          ) : null}
           <button
             type="button"
             className="btn primary"
@@ -186,26 +219,42 @@ export function CompressProgressPanel({
               <span className="compress-pct mono">
                 {Math.round(row.percent)}%
               </span>
-              {rowCancellable(row) ? (
-                <button
-                  type="button"
-                  className="btn danger compress-row-cancel"
-                  onClick={() => onCancelOne(row.jobId)}
-                  aria-label={`Cancel ${row.sourcePath}`}
-                >
-                  CANCEL
-                </button>
-              ) : null}
-              {onPreviewImage && isImagePreviewable(row) ? (
-                <button
-                  type="button"
-                  className="btn compress-row-preview"
-                  onClick={() => onPreviewImage(row)}
-                  aria-label={`Preview ${row.sourcePath}`}
-                >
-                  PREVIEW
-                </button>
-              ) : null}
+              <div className="compress-row-side">
+                {onReveal ? (
+                  <RevealRowActions
+                    targets={{
+                      sourcePath: row.sourcePath,
+                      outputPath: row.outputPath,
+                    }}
+                    onReveal={(action) =>
+                      onReveal(action, {
+                        sourcePath: row.sourcePath,
+                        outputPath: row.outputPath,
+                      })
+                    }
+                  />
+                ) : null}
+                {rowCancellable(row) ? (
+                  <button
+                    type="button"
+                    className="btn danger compress-row-cancel"
+                    onClick={() => onCancelOne(row.jobId)}
+                    aria-label={`Cancel ${row.sourcePath}`}
+                  >
+                    CANCEL
+                  </button>
+                ) : null}
+                {onPreviewImage && isImagePreviewable(row) ? (
+                  <button
+                    type="button"
+                    className="btn compress-row-preview"
+                    onClick={() => onPreviewImage(row)}
+                    aria-label={`Preview ${row.sourcePath}`}
+                  >
+                    PREVIEW
+                  </button>
+                ) : null}
+              </div>
             </li>
           ))}
         </ul>

@@ -1,10 +1,11 @@
 import { formatBytes } from "../intake/formatBytes";
 import type { ProgressRow } from "./progressState";
 
-/** Session aggregates derived from completed/failed job rows. */
+/** Session aggregates derived from completed/failed/skipped job rows. */
 export type SessionStats = {
   filesDone: number;
   filesFailed: number;
+  filesSkipped: number;
   bytesIn: number;
   bytesOut: number;
   /** Signed: negative when out > in. */
@@ -15,11 +16,12 @@ export type SessionStats = {
 
 /**
  * Derive live session meters from HUD rows.
- * Failed jobs count toward filesFailed only — never toward byte savings.
+ * Failed/skipped jobs count toward their counters only — never toward byte savings.
  */
 export function aggregateSessionStats(rows: ProgressRow[]): SessionStats {
   let filesDone = 0;
   let filesFailed = 0;
+  let filesSkipped = 0;
   let bytesIn = 0;
   let bytesOut = 0;
 
@@ -35,6 +37,8 @@ export function aggregateSessionStats(rows: ProgressRow[]): SessionStats {
       }
     } else if (row.phase === "FAILED") {
       filesFailed += 1;
+    } else if (row.phase === "SKIPPED") {
+      filesSkipped += 1;
     }
   }
 
@@ -45,6 +49,7 @@ export function aggregateSessionStats(rows: ProgressRow[]): SessionStats {
   return {
     filesDone,
     filesFailed,
+    filesSkipped,
     bytesIn,
     bytesOut,
     bytesSaved,

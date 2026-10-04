@@ -11,10 +11,12 @@
 //! - `strip_metadata = false`: keep sensor pixels + copy EXIF (incl. orientation/GPS) on JPEG;
 //!   WebP bakes orientation into pixels (container EXIF not written by the WebP path).
 
-use std::fs::File;
-use std::io::{BufReader, BufWriter};
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, BufWriter, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::codecs::gif::GifDecoder;
 use image::imageops::FilterType;
@@ -111,16 +113,33 @@ fn webp_quality_for_preset(target: ImageEncodeTarget) -> f32 {
     }
 }
 
+/// Monotonic seq so consecutive calls in the same nanosecond never collide
+/// (original + compressed preview temps are created back-to-back).
+static PREVIEW_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Allocate a unique preview temp path by claiming it with `create_new`.
 fn preview_temp_path(ext: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "fo-img-preview-{}-{}.{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+    loop {
+        let seq = PREVIEW_TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos(),
-        ext
-    ))
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "fo-img-preview-{}-{}-{}.{}",
+            std::process::id(),
+            nanos,
+            seq,
+            ext
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return path,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            // Rare: temp dir unwritable etc. — still return a unique name so
+            // callers surface their own write/copy errors.
+            Err(_) => return path,
+        }
+    }
 }
 
 fn decode_heic_to_temp_png(source: &Path) -> Result<PathBuf, String> {
@@ -716,6 +735,34 @@ mod tests {
         assert_ne!(preview, src);
         assert!(preview.is_file());
         let _ = fs::remove_file(&preview);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preview_temp_path_consecutive_calls_are_unique() {
+        let a = preview_temp_path("png");
+        let b = preview_temp_path("png");
+        assert_ne!(a, b, "original/compressed temps must not share a path");
+        assert!(a.is_file());
+        assert!(b.is_file());
+        let _ = fs::remove_file(&a);
+        let _ = fs::remove_file(&b);
+    }
+
+    #[test]
+    fn prepare_preview_raster_pair_uses_distinct_temps() {
+        let dir = temp_dir("preview-pair");
+        let original = dir.join("orig.png");
+        let compressed = dir.join("out.png");
+        write_gradient_png(&original, 16, 12);
+        write_gradient_png(&compressed, 16, 12);
+        let a = prepare_preview_raster(&original).expect("original temp");
+        let b = prepare_preview_raster(&compressed).expect("compressed temp");
+        assert_ne!(a, b);
+        assert!(a.is_file());
+        assert!(b.is_file());
+        let _ = fs::remove_file(&a);
+        let _ = fs::remove_file(&b);
         let _ = fs::remove_dir_all(&dir);
     }
 

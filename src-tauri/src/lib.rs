@@ -3,7 +3,8 @@ mod intake;
 mod preview;
 
 use compress::{
-    compress_cancel, compress_list, compress_list_presets, compress_start, JobManager,
+    compress_cancel, compress_estimate, compress_list, compress_list_presets, compress_start,
+    JobManager,
 };
 use intake::intake_resolve;
 use preview::{preview_allow_assets, preview_revoke_assets, PreviewGrantState};
@@ -33,6 +34,7 @@ fn app_info() -> AppInfo {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(JobManager::default())
         .manage(PreviewGrantState::default())
         .invoke_handler(tauri::generate_handler![
@@ -42,6 +44,7 @@ pub fn run() {
             compress_cancel,
             compress_list,
             compress_list_presets,
+            compress_estimate,
             intake_resolve,
             preview_allow_assets,
             preview_revoke_assets
