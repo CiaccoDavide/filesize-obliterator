@@ -95,6 +95,7 @@ export function CompressProgressPanel({
   const stats = aggregateSessionStats(rows);
   const hasFinished =
     stats.filesDone + stats.filesFailed + stats.filesSkipped > 0;
+  const metersComplete = phase === "COMPLETE";
 
   return (
     <section className="hud-frame compress-panel" aria-label="Compress progress">
@@ -123,7 +124,7 @@ export function CompressProgressPanel({
         </div>
 
         <div
-          className="compress-meters"
+          className={`compress-meters${metersComplete ? " meters-complete" : ""}`}
           aria-label="Session savings"
           data-testid="session-meters"
         >
@@ -211,8 +212,23 @@ export function CompressProgressPanel({
       ) : (
         <ul className="compress-list">
           {rows.map((row) => (
-            <li key={row.jobId} className="compress-row">
+            <li
+              key={row.jobId}
+              className={[
+                "compress-row",
+                row.phase === "COMPLETE" ? "is-complete" : "",
+                row.phase === "ABORTING" ? "is-aborting" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+            >
               <span className="compress-row-phase">
+                {row.phase === "ABORTING" ? (
+                  <span className="abort-spinner" aria-hidden="true" />
+                ) : null}
+                {row.phase === "COMPRESSING" ? (
+                  <span className="hud-tick" aria-hidden="true" />
+                ) : null}
                 {opsPhaseStatusText(row.phase)}
               </span>
               <div className="compress-row-main">
@@ -229,7 +245,9 @@ export function CompressProgressPanel({
                 aria-valuemax={100}
               >
                 <span
-                  className="compress-bar-fill"
+                  className={`compress-bar-fill${
+                    row.phase === "COMPRESSING" ? " is-running" : ""
+                  }`}
                   style={{ width: `${Math.min(100, Math.max(0, row.percent))}%` }}
                 />
               </div>
