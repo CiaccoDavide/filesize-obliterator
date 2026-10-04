@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
 
+use super::output::prepare_output_path;
 use super::state::{apply_transition, should_continue, Transition, TransitionError};
 use super::types::{
     CompressEvent, CompressStartRequest, JobInfo, JobStatus, COMPRESS_EVENT,
@@ -250,17 +251,6 @@ fn emit(app: &AppHandle, event: CompressEvent) {
     let _ = app.emit(COMPRESS_EVENT, event);
 }
 
-fn stub_output_path(job_id: &str, source: &Path) -> PathBuf {
-    let stem = source
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output");
-    std::env::temp_dir()
-        .join("filesize-obliterator")
-        .join(job_id)
-        .join(format!("{stem}.stub"))
-}
-
 fn run_stub_job(
     manager: JobManager,
     app: AppHandle,
@@ -298,11 +288,10 @@ fn run_stub_job(
     );
 
     let source = PathBuf::from(&source_path);
-    let output_path = stub_output_path(&job_id, &source);
-
-    if let Some(parent) = output_path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
-            let error = format!("cannot create output dir: {e}");
+    // Stub codec extension; real encoders pass their output ext / preset slug.
+    let output_path = match prepare_output_path(&source, "stub") {
+        Ok(path) => path,
+        Err(error) => {
             let _ = manager.mark_failed(&job_id, error.clone());
             emit(
                 &app,
@@ -313,7 +302,7 @@ fn run_stub_job(
             );
             return;
         }
-    }
+    };
 
     // Partial staging file — never promoted on cancel.
     let partial_path = output_path.with_extension("stub.partial");
@@ -487,16 +476,6 @@ mod tests {
         let mut f = fs::File::create(&path).expect("create");
         f.write_all(contents).expect("write");
         path
-    }
-
-    #[test]
-    fn stub_output_path_nests_under_temp_job_dir() {
-        let source = Path::new("/tmp/photos/Holiday.JPG");
-        let out = stub_output_path("job-9", source);
-        let s = out.to_string_lossy();
-        assert!(s.contains("filesize-obliterator"));
-        assert!(s.contains("job-9"));
-        assert!(s.ends_with("Holiday.stub"));
     }
 
     #[test]
