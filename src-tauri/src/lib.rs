@@ -1,3 +1,6 @@
+mod compress;
+
+use compress::{compress_cancel, compress_list, compress_start, JobManager};
 use serde::Serialize;
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -23,7 +26,14 @@ fn app_info() -> AppInfo {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ping, app_info])
+        .manage(JobManager::default())
+        .invoke_handler(tauri::generate_handler![
+            ping,
+            app_info,
+            compress_start,
+            compress_cancel,
+            compress_list
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
