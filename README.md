@@ -81,6 +81,18 @@ Video is re-encoded locally with **ffmpeg** (H.264 + AAC → `.mp4`). The binary
 
 **Supported input containers:** MP4, WebM, MKV, MOV, M4V (demuxers permitting). AVI/MPEG/WMV are rejected as unsupported in this build. Long encodes emit progress during the run; cancel cooperatively stops ffmpeg. Outputs land beside the source under `_compressed/`; the source file is never modified.
 
+## PDF compression (offline)
+
+PDFs are recompressed locally with **Ghostscript** (`pdfwrite` + `PDFSETTINGS`). The binary is resolved from `GS_PATH`, a sidecar next to the app bundle, or `PATH` (`gs` / `gswin64c`). Missing Ghostscript fails with a clear **missing tool** error (no network download). Built-in presets:
+
+| Id | Label | Output | Notes |
+|----|-------|--------|-------|
+| `pdf-print` | Print | `.pdf` | ~300 dpi; quality-first (may not shrink already-optimized PDFs) |
+| `pdf-ebook` | Ebook | `.pdf` | ~150 dpi; default tradeoff |
+| `pdf-screen` | Screen | `.pdf` | ~72 dpi; size-first — typical image-heavy PDFs shrink vs print |
+
+**Encrypted / password-protected PDFs** fail clearly (no password UI in this build). Invalid inputs fail without crashing. Outputs remain valid PDFs under `_compressed/` beside the source; the source file is never modified.
+
 ## Layout
 
 | Path | Role |

@@ -236,11 +236,91 @@ pub fn video_preset(id: &str) -> Option<&'static VideoPreset> {
     VIDEO_PRESETS.iter().find(|p| p.id == id)
 }
 
-/// All built-in presets (image + audio + video; pdf arrives in a later task).
+/// Stable PDF preset ids (Ghostscript `PDFSETTINGS` print / ebook / screen).
+pub const PDF_PRINT: &str = "pdf-print";
+pub const PDF_EBOOK: &str = "pdf-ebook";
+pub const PDF_SCREEN: &str = "pdf-screen";
+
+/// Ghostscript `-dPDFSETTINGS=` target for PDF image DPI / quality tradeoffs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfSettings {
+    /// ~300 dpi — quality-first / print.
+    Printer,
+    /// ~150 dpi — balanced ebook.
+    Ebook,
+    /// ~72 dpi — smallest / screen.
+    Screen,
+}
+
+impl PdfSettings {
+    pub fn gs_name(self) -> &'static str {
+        match self {
+            PdfSettings::Printer => "/printer",
+            PdfSettings::Ebook => "/ebook",
+            PdfSettings::Screen => "/screen",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PdfPreset {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub settings: PdfSettings,
+}
+
+impl PdfPreset {
+    pub fn output_ext(&self) -> &'static str {
+        "pdf"
+    }
+
+    pub fn info(&self) -> PresetInfo {
+        PresetInfo {
+            id: self.id.into(),
+            label: self.label.into(),
+            kind: MediaKind::Pdf,
+            description: self.description.into(),
+        }
+    }
+}
+
+/// Built-in PDF presets — print / ebook / screen via Ghostscript PDFSETTINGS.
+const PDF_PRESETS: &[PdfPreset] = &[
+    PdfPreset {
+        id: PDF_PRINT,
+        label: "Print",
+        description: "Print-quality PDF (~300 dpi). Quality-first; may not shrink already-optimized PDFs.",
+        settings: PdfSettings::Printer,
+    },
+    PdfPreset {
+        id: PDF_EBOOK,
+        label: "Ebook",
+        description: "Ebook PDF (~150 dpi). Good quality/size tradeoff for typical image-heavy docs.",
+        settings: PdfSettings::Ebook,
+    },
+    PdfPreset {
+        id: PDF_SCREEN,
+        label: "Screen",
+        description: "Screen PDF (~72 dpi). Prioritizes file size; typical image-heavy PDFs shrink vs print.",
+        settings: PdfSettings::Screen,
+    },
+];
+
+pub fn pdf_presets() -> &'static [PdfPreset] {
+    PDF_PRESETS
+}
+
+pub fn pdf_preset(id: &str) -> Option<&'static PdfPreset> {
+    PDF_PRESETS.iter().find(|p| p.id == id)
+}
+
+/// All built-in presets (image + audio + video + pdf).
 pub fn all_presets() -> Vec<PresetInfo> {
     let mut out: Vec<_> = image_presets().iter().map(ImagePreset::info).collect();
     out.extend(audio_presets().iter().map(AudioPreset::info));
     out.extend(video_presets().iter().map(VideoPreset::info));
+    out.extend(pdf_presets().iter().map(PdfPreset::info));
     out
 }
 
@@ -302,11 +382,29 @@ mod tests {
     }
 
     #[test]
-    fn presets_for_kind_filters_image_audio_video() {
+    fn pdf_registry_has_three_stable_ids() {
+        let ids: Vec<_> = pdf_presets().iter().map(|p| p.id).collect();
+        assert_eq!(ids, vec![PDF_PRINT, PDF_EBOOK, PDF_SCREEN]);
+        for p in pdf_presets() {
+            assert_eq!(p.info().kind, MediaKind::Pdf);
+            assert!(!p.label.is_empty());
+            assert!(!p.description.is_empty());
+            assert_eq!(p.output_ext(), "pdf");
+        }
+        assert_eq!(pdf_preset(PDF_PRINT).unwrap().settings, PdfSettings::Printer);
+        assert_eq!(pdf_preset(PDF_EBOOK).unwrap().settings, PdfSettings::Ebook);
+        assert_eq!(pdf_preset(PDF_SCREEN).unwrap().settings, PdfSettings::Screen);
+        assert_eq!(pdf_preset(PDF_PRINT).unwrap().settings.gs_name(), "/printer");
+        assert_eq!(pdf_preset(PDF_EBOOK).unwrap().settings.gs_name(), "/ebook");
+        assert_eq!(pdf_preset(PDF_SCREEN).unwrap().settings.gs_name(), "/screen");
+    }
+
+    #[test]
+    fn presets_for_kind_filters_image_audio_video_pdf() {
         assert_eq!(presets_for_kind(&MediaKind::Image).len(), 3);
         assert_eq!(presets_for_kind(&MediaKind::Audio).len(), 3);
         assert_eq!(presets_for_kind(&MediaKind::Video).len(), 3);
-        assert!(presets_for_kind(&MediaKind::Pdf).is_empty());
+        assert_eq!(presets_for_kind(&MediaKind::Pdf).len(), 3);
     }
 
     #[test]
@@ -329,5 +427,23 @@ mod tests {
         assert!(json.contains("\"id\":\"video-small\""));
         assert!(json.contains("\"kind\":\"video\""));
         assert!(json.contains("\"label\":\"Social small\""));
+
+        let pdf = pdf_preset(PDF_EBOOK).unwrap().info();
+        let json = serde_json::to_string(&pdf).expect("ser");
+        assert!(json.contains("\"id\":\"pdf-ebook\""));
+        assert!(json.contains("\"kind\":\"pdf\""));
+        assert!(json.contains("\"label\":\"Ebook\""));
+        assert!(json.contains("\"description\":"));
+
+        let print = pdf_preset(PDF_PRINT).unwrap().info();
+        let json = serde_json::to_string(&print).expect("ser");
+        assert!(json.contains("\"id\":\"pdf-print\""));
+        assert!(json.contains("\"kind\":\"pdf\""));
+
+        let screen = pdf_preset(PDF_SCREEN).unwrap().info();
+        let json = serde_json::to_string(&screen).expect("ser");
+        assert!(json.contains("\"id\":\"pdf-screen\""));
+        assert!(json.contains("\"kind\":\"pdf\""));
+        assert!(json.contains("\"label\":\"Screen\""));
     }
 }

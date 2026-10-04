@@ -4,19 +4,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tauri::{AppHandle, Emitter};
 
 use super::audio_encode::encode_audio;
 use super::image_encode::encode_image;
 use super::output::prepare_output_path;
-use super::presets::{audio_preset, image_preset, video_preset};
-use super::video_encode::encode_video;
+use super::pdf_encode::encode_pdf;
+use super::presets::{audio_preset, image_preset, pdf_preset, video_preset};
 use super::state::{apply_transition, should_continue, Transition, TransitionError};
 use super::types::{
     CompressEvent, CompressStartRequest, JobInfo, JobStatus, MediaKind, COMPRESS_EVENT,
 };
+use super::video_encode::encode_video;
 
 struct JobRecord {
     info: JobInfo,
@@ -296,8 +297,9 @@ fn resolve_output_ext(media_kind: &MediaKind, preset_id: &str) -> Result<&'stati
         MediaKind::Video => video_preset(preset_id)
             .map(|p| p.output_ext())
             .ok_or_else(|| format!("unknown video preset: {preset_id}")),
-        // Pdf encoder arrives in a later task — stub extension for now.
-        MediaKind::Pdf => Ok("stub"),
+        MediaKind::Pdf => pdf_preset(preset_id)
+            .map(|p| p.output_ext())
+            .ok_or_else(|| format!("unknown pdf preset: {preset_id}")),
     }
 }
 
@@ -336,7 +338,7 @@ fn run_job(
         MediaKind::Image => "image",
         MediaKind::Audio => "audio",
         MediaKind::Video => "video",
-        MediaKind::Pdf => "stub",
+        MediaKind::Pdf => "pdf",
     };
     emit(
         &app,
@@ -452,7 +454,20 @@ fn run_job(
             }
             result
         }
-        MediaKind::Pdf => run_stub_encode(&manager, &job_id, &cancel, &partial_path, report_progress),
+        MediaKind::Pdf => {
+            if !report_progress(20.0) {
+                release_reserved();
+                cancel_job(&manager, &app, job_id);
+                return;
+            }
+            let result = encode_pdf(&source, &preset_id, &partial_path, Some(cancel.as_ref()));
+            if result.is_ok() && !report_progress(90.0) {
+                release_reserved();
+                cancel_job(&manager, &app, job_id);
+                return;
+            }
+            result
+        }
     };
 
     if let Err(error) = encode_result {
@@ -545,30 +560,6 @@ fn run_job(
             fail_job(&manager, &app, job_id, e);
         }
     }
-}
-
-/// Placeholder encoder for kinds without a real pipeline yet (pdf).
-fn run_stub_encode(
-    manager: &JobManager,
-    job_id: &str,
-    cancel: &AtomicBool,
-    partial_path: &Path,
-    mut report_progress: impl FnMut(f64) -> bool,
-) -> Result<(), String> {
-    let steps = [20.0_f64, 40.0, 60.0, 80.0];
-    for percent in steps {
-        if cancel.load(Ordering::SeqCst) || manager.is_cancel_requested(job_id) {
-            return Err("cancelled".into());
-        }
-        if !report_progress(percent) {
-            return Err("cancelled".into());
-        }
-        thread::sleep(Duration::from_millis(40));
-    }
-
-    let stub_bytes = b"fo-stub\n";
-    fs::write(partial_path, stub_bytes).map_err(|e| format!("write failed: {e}"))?;
-    Ok(())
 }
 
 #[cfg(test)]
