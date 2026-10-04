@@ -81,10 +81,26 @@ describe("localAssetUrl", () => {
     expect(localAssetUrl("/Users/me/pic.png", convert)).toBe(
       "asset://localhost/%2FUsers%2Fme%2Fpic.png",
     );
+    expect(localAssetUrl("C:\\Users\\me\\pic.png", convert)).toBe(
+      "asset://localhost/C%3A%5CUsers%5Cme%5Cpic.png",
+    );
   });
 
   it("rejects empty paths", () => {
     expect(() => localAssetUrl("", () => "x")).toThrow(/path/i);
+    expect(() => localAssetUrl("   ", () => "x")).toThrow(/path/i);
+  });
+
+  it("rejects relative paths, URI schemes, and parent traversal", () => {
+    expect(() => localAssetUrl("pic.png", () => "x")).toThrow(/absolute/i);
+    expect(() => localAssetUrl("https://evil.example/a.png", () => "x")).toThrow(
+      /scheme/i,
+    );
+    expect(() => localAssetUrl("asset://localhost/x", () => "x")).toThrow(/scheme/i);
+    expect(() => localAssetUrl("file:///tmp/a.png", () => "x")).toThrow(/scheme/i);
+    expect(() => localAssetUrl("/Users/me/../secret/pic.png", () => "x")).toThrow(
+      /traversal/i,
+    );
   });
 });
 

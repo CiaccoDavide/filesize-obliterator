@@ -549,6 +549,18 @@
   overflow: hidden;
 }
 
+.preview-status {
+  margin: 0;
+  font-size: 0.65rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.preview-status.tone-danger {
+  color: var(--danger);
+}
+
 .preview-img {
   display: block;
   max-width: 100%;

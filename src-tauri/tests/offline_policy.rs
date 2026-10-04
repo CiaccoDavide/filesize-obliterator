@@ -72,6 +72,36 @@ fn tauri_csp_blocks_remote_http_and_https() {
 }
 
 #[test]
+fn asset_protocol_scope_is_not_filesystem_wildcard() {
+    let conf = parse_json(&repo_root().join("src-tauri/tauri.conf.json"));
+    let enabled = conf
+        .pointer("/app/security/assetProtocol/enable")
+        .and_then(|v| v.as_bool())
+        .expect("assetProtocol.enable must be set");
+    assert!(enabled, "asset protocol must stay enabled for offline preview");
+
+    let scope = conf
+        .pointer("/app/security/assetProtocol/scope")
+        .expect("assetProtocol.scope must be present");
+    let patterns: Vec<&str> = if let Some(arr) = scope.as_array() {
+        arr.iter().filter_map(|v| v.as_str()).collect()
+    } else if let Some(obj) = scope.as_object() {
+        obj.get("allow")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .collect()
+    } else {
+        panic!("assetProtocol.scope must be an array or scope object");
+    };
+    assert!(
+        patterns.iter().all(|p| *p != "**" && !p.ends_with("/**")),
+        "assetProtocol.scope must not grant whole-filesystem access: {patterns:?}"
+    );
+}
+
+#[test]
 fn auto_updater_is_not_configured() {
     let conf = parse_json(&repo_root().join("src-tauri/tauri.conf.json"));
     if let Some(plugins) = conf.get("plugins") {

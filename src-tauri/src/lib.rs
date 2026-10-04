@@ -1,10 +1,12 @@
 mod compress;
 mod intake;
+mod preview;
 
 use compress::{
     compress_cancel, compress_list, compress_list_presets, compress_start, JobManager,
 };
 use intake::intake_resolve;
+use preview::preview_allow_assets;
 use serde::Serialize;
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -39,7 +41,8 @@ pub fn run() {
             compress_cancel,
             compress_list,
             compress_list_presets,
-            intake_resolve
+            intake_resolve,
+            preview_allow_assets
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
