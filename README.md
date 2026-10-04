@@ -39,7 +39,7 @@ npm run build
 ```bash
 npm run typecheck
 npm test                 # Vitest (frontend unit tests)
-npm run test:rust        # cargo test in src-tauri
+npm run test:rust        # cargo test -- --nocapture in src-tauri
 npm run test:all         # frontend + Rust
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
@@ -47,7 +47,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 ### Tests
 
 - **Frontend:** `npm test` (Vitest). Offline; no network.
-- **Rust:** `npm run test:rust` or `cargo test --manifest-path src-tauri/Cargo.toml`. Covers `_compressed` path rules and a smoke encode per media kind against fixtures under `src-tauri/tests/fixtures/`.
+- **Rust:** `npm run test:rust` (`cargo test --manifest-path src-tauri/Cargo.toml -- --nocapture`). Covers `_compressed` path rules and a smoke encode per media kind against fixtures under `src-tauri/tests/fixtures/`. `--nocapture` keeps soft-skip reasons visible on stderr.
 - **Optional tools:** Video smoke needs a local `ffmpeg`; PDF smoke needs Ghostscript (`gs`). When either is missing, those tests print `ignoring test: missing tool…` on stderr and soft-skip (they do not fail CI). Image and audio smokes use pure-Rust codecs and always run.
 - Paths under test use temp dirs only — never machine-specific absolute paths outside of temp.
 

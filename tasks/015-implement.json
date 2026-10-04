@@ -24,12 +24,12 @@
     {
       "id": "test-scripts-documented",
       "met": true,
-      "via": "package.json test / test:rust / test:all; README Useful checks + Tests section"
+      "via": "package.json test / test:rust (-- --nocapture) / test:all; README Useful checks + Tests section"
     },
     {
       "id": "ci-friendly-skips",
       "met": true,
-      "via": "require_ffmpeg / require_gs soft-skip with eprintln('ignoring test: …') when tools absent; image/audio always run"
+      "via": "require_ffmpeg / require_gs soft-skip with eprintln('ignoring test: …') when tools absent; npm run test:rust passes --nocapture so reasons are visible; image/audio always run"
     },
     {
       "id": "no-machine-absolute-paths",
@@ -39,6 +39,7 @@
   ],
   "notes": [
     "Did not weaken existing encode/path assertions — only converted panic gates to soft-skips and pointed smokes at committed fixtures.",
-    "Video/PDF encode still full-run when ffmpeg/gs are installed."
+    "Video/PDF encode still full-run when ffmpeg/gs are installed.",
+    "test:rust uses cargo -- --nocapture so soft-skip eprintln reasons stay visible under the documented npm script."
   ]
 }
