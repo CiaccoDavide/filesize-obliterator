@@ -367,15 +367,22 @@ mod tests {
             .join(name)
     }
 
-    fn require_ffmpeg() -> PathBuf {
-        resolve_ffmpeg().unwrap_or_else(|e| {
-            panic!("ffmpeg required for video encode tests: {e}");
-        })
+    /// Soft-skip gate: when ffmpeg is absent, print an explicit ignore reason and return `None`
+    /// so CI / bare hosts skip encoder-heavy tests instead of failing.
+    fn require_ffmpeg() -> Option<PathBuf> {
+        match resolve_ffmpeg() {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("ignoring test: {e}");
+                None
+            }
+        }
     }
 
     /// Tiny synthetic MP4 (color bars + sine) for offline roundtrip tests.
+    /// Caller must soft-skip via [`require_ffmpeg`] first.
     fn write_fixture_mp4(path: &Path, seconds: f32) {
-        let ffmpeg = require_ffmpeg();
+        let ffmpeg = resolve_ffmpeg().expect("ffmpeg required to synthesize video fixture");
         let status = Command::new(&ffmpeg)
             .args([
                 "-hide_banner",
@@ -482,7 +489,9 @@ mod tests {
 
     #[test]
     fn corrupt_video_fails_without_panic() {
-        require_ffmpeg();
+        let Some(_) = require_ffmpeg() else {
+            return;
+        };
         let dir = temp_dir("corrupt");
         let junk = dir.join("broken.mp4");
         fs::write(&junk, b"not-a-video-file").expect("write");
@@ -498,8 +507,9 @@ mod tests {
 
     /// Heavier source so ffmpeg emits multiple `-progress` out_time samples (tiny
     /// fixtures often finish in one tick and only surface the terminal percent).
+    /// Caller must soft-skip via [`require_ffmpeg`] first.
     fn write_progress_fixture_mp4(path: &Path) {
-        let ffmpeg = require_ffmpeg();
+        let ffmpeg = resolve_ffmpeg().expect("ffmpeg required to synthesize progress fixture");
         let status = Command::new(&ffmpeg)
             .args([
                 "-hide_banner",
@@ -530,7 +540,9 @@ mod tests {
 
     #[test]
     fn encodes_mp4_for_each_preset_with_mid_progress() {
-        require_ffmpeg();
+        let Some(_) = require_ffmpeg() else {
+            return;
+        };
         let dir = temp_dir("roundtrip");
         let src = dir.join("tone.mp4");
         write_progress_fixture_mp4(&src);
@@ -570,11 +582,12 @@ mod tests {
 
     #[test]
     fn balanced_and_small_shrink_verbose_source() {
-        require_ffmpeg();
+        let Some(ffmpeg) = require_ffmpeg() else {
+            return;
+        };
         let dir = temp_dir("shrink");
         let src = dir.join("fat.mp4");
         // Higher bitrate source so re-encode can shrink.
-        let ffmpeg = require_ffmpeg();
         let status = Command::new(&ffmpeg)
             .args([
                 "-hide_banner",
@@ -621,10 +634,18 @@ mod tests {
 
     #[test]
     fn smoke_writes_under_compressed_via_prepare_output_path() {
-        require_ffmpeg();
+        let Some(_) = require_ffmpeg() else {
+            return;
+        };
         let dir = temp_dir("smoke-path");
+        let fixture_src = fixture("tone.mp4");
+        assert!(
+            fixture_src.is_file(),
+            "missing fixture {}",
+            fixture_src.display()
+        );
         let src = dir.join("Holiday.MP4");
-        write_fixture_mp4(&src, 0.8);
+        fs::copy(&fixture_src, &src).expect("copy committed video fixture");
 
         let preset = video_preset(VIDEO_BALANCED).expect("preset");
         let reserved = prepare_output_path(&src, preset.output_ext()).expect("reserve");
@@ -640,7 +661,9 @@ mod tests {
 
     #[test]
     fn respects_cancel_flag_without_leaving_output() {
-        require_ffmpeg();
+        let Some(_) = require_ffmpeg() else {
+            return;
+        };
         let dir = temp_dir("cancel");
         let src = dir.join("long.mp4");
         write_fixture_mp4(&src, 3.0);
@@ -655,7 +678,9 @@ mod tests {
 
     #[test]
     fn cancel_during_progress_kills_encode() {
-        require_ffmpeg();
+        let Some(_) = require_ffmpeg() else {
+            return;
+        };
         let dir = temp_dir("cancel-mid");
         let src = dir.join("long.mp4");
         write_progress_fixture_mp4(&src);
@@ -694,7 +719,9 @@ mod tests {
 
     #[test]
     fn encodes_webm_and_mkv_fixtures_to_mp4() {
-        require_ffmpeg();
+        let Some(_) = require_ffmpeg() else {
+            return;
+        };
         let dir = temp_dir("containers");
         for name in ["tone.webm", "tone.mkv"] {
             let src = fixture(name);

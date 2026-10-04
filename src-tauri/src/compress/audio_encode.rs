@@ -457,8 +457,14 @@ mod tests {
         use crate::compress::presets::audio_preset;
 
         let dir = temp_dir("smoke-path");
+        let fixture_src = fixture("tone.wav");
+        assert!(
+            fixture_src.is_file(),
+            "missing fixture {}",
+            fixture_src.display()
+        );
         let wav = dir.join("Holiday.WAV");
-        write_sine_wav(&wav, 0.5);
+        fs::copy(&fixture_src, &wav).expect("copy committed audio fixture");
 
         let preset = audio_preset(AUDIO_BALANCED).expect("preset");
         let reserved = prepare_output_path(&wav, preset.output_ext()).expect("reserve");

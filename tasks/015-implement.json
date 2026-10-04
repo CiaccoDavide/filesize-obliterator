@@ -1,0 +1,45 @@
+{
+  "issue": 15,
+  "task": "015-tests-compression-and-paths",
+  "branch": "ship/15-tests",
+  "base": "origin/main",
+  "closes": "#15",
+  "status": "implemented",
+  "acceptance": [
+    {
+      "id": "path-helper-collision-and-dir",
+      "met": true,
+      "via": "compress::output unit tests: preferred path, collision suffixes, prepare creates _compressed + reserves, concurrent prepares"
+    },
+    {
+      "id": "smoke-per-media-kind",
+      "met": true,
+      "via": "smoke_writes_under_compressed_via_prepare_output_path in image/audio/video/pdf encode modules; fixtures under src-tauri/tests/fixtures/{image,audio,video,pdf}"
+    },
+    {
+      "id": "tests-offline",
+      "met": true,
+      "via": "No network in test paths; fixtures are local synthetic media; codecs/tools resolved from PATH/sidecar only"
+    },
+    {
+      "id": "test-scripts-documented",
+      "met": true,
+      "via": "package.json test / test:rust (-- --nocapture) / test:all; README Useful checks + Tests section"
+    },
+    {
+      "id": "ci-friendly-skips",
+      "met": true,
+      "via": "require_ffmpeg / require_gs soft-skip with eprintln('ignoring test: …') when tools absent; npm run test:rust passes --nocapture so reasons are visible; image/audio always run"
+    },
+    {
+      "id": "no-machine-absolute-paths",
+      "met": true,
+      "via": "Smokes copy fixtures into std::env::temp_dir(); path unit tests use PathBuf literals or temp roots"
+    }
+  ],
+  "notes": [
+    "Did not weaken existing encode/path assertions — only converted panic gates to soft-skips and pointed smokes at committed fixtures.",
+    "Video/PDF encode still full-run when ffmpeg/gs are installed.",
+    "test:rust uses cargo -- --nocapture so soft-skip eprintln reasons stay visible under the documented npm script."
+  ]
+}
