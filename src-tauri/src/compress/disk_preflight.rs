@@ -147,6 +147,17 @@ fn free_bytes_unix(path: &Path) -> Result<u64, String> {
     }
 }
 
+/// FNV-1a 64-bit hash for stable volume identity strings (no extra crate).
+#[cfg(windows)]
+fn fnv1a64_lower(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in s.to_ascii_lowercase().bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 #[cfg(windows)]
 fn free_bytes_windows(path: &Path) -> Result<u64, String> {
     use std::os::windows::ffi::OsStrExt;
@@ -187,6 +198,11 @@ extern "system" {
         total_number_of_bytes: *mut u64,
         total_number_of_free_bytes: *mut u64,
     ) -> i32;
+    fn GetVolumePathNameW(
+        lpsz_file_name: *const u16,
+        lpsz_volume_path_name: *mut u16,
+        cch_buffer_length: u32,
+    ) -> i32;
 }
 
 #[cfg(unix)]
@@ -197,17 +213,53 @@ fn volume_key(path: &Path) -> Result<u64, String> {
 }
 
 #[cfg(windows)]
-fn volume_key(path: &Path) -> Result<u64, String> {
-    // Group by free-space probe identity: canonicalize when possible so siblings share a key.
-    let canon = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let s = canon.to_string_lossy().to_ascii_lowercase();
-    // Stable hash without pulling a hasher crate — FNV-1a 64.
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for b in s.bytes() {
-        hash ^= u64::from(b);
-        hash = hash.wrapping_mul(0x100000001b3);
+fn volume_root_for_path(path: &Path) -> Result<PathBuf, String> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let mut probe = path.to_path_buf();
+    if !probe.exists() {
+        probe = path
+            .parent()
+            .filter(|p| p.exists())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
     }
-    Ok(hash)
+
+    let wide: Vec<u16> = probe
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+    let mut capacity = 260usize;
+    loop {
+        let mut buf = vec![0u16; capacity];
+        // SAFETY: `wide` is NUL-terminated; `buf` is writable with given length.
+        let ok = unsafe {
+            GetVolumePathNameW(wide.as_ptr(), buf.as_mut_ptr(), capacity as u32)
+        };
+        if ok != 0 {
+            let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            let root = PathBuf::from(std::ffi::OsString::from_wide(&buf[..end]));
+            return Ok(root);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(ERROR_INSUFFICIENT_BUFFER as i32) && capacity < 32_768 {
+            capacity = capacity.saturating_mul(2);
+            continue;
+        }
+        return Err(format!(
+            "GetVolumePathNameW failed for {}: {err}",
+            probe.display()
+        ));
+    }
+}
+
+#[cfg(windows)]
+fn volume_key(path: &Path) -> Result<u64, String> {
+    let root = volume_root_for_path(path)?;
+    Ok(fnv1a64_lower(&root.to_string_lossy()))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -263,7 +315,7 @@ pub fn preflight_request(request: DiskPreflightRequest) -> Result<DiskPreflightR
         });
     }
 
-    Ok(worst.unwrap_or_else(|| DiskPreflightResult {
+    Ok(worst.unwrap_or(DiskPreflightResult {
         ok: true,
         free_bytes: 0,
         needed_bytes: 0,
@@ -349,6 +401,46 @@ mod tests {
         assert!(result.ok);
         assert_eq!(result.needed_bytes, 32 + DISK_HEADROOM_BYTES);
         assert!(result.free_bytes >= result.needed_bytes);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preflight_aggregates_write_bytes_on_same_volume() {
+        let dir = std::env::temp_dir().join(format!(
+            "fo-disk-aggregate-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(dir.join("trip")).unwrap();
+        let source_a = dir.join("a.bin");
+        let source_b = dir.join("trip").join("b.bin");
+        fs::write(&source_a, vec![0u8; 8]).unwrap();
+        fs::write(&source_b, vec![0u8; 8]).unwrap();
+
+        let result = preflight_request(DiskPreflightRequest {
+            items: vec![
+                DiskPreflightItem {
+                    source_path: source_a.to_string_lossy().into_owned(),
+                    original_bytes: 1_000,
+                    estimated_bytes: Some(500),
+                },
+                DiskPreflightItem {
+                    source_path: source_b.to_string_lossy().into_owned(),
+                    original_bytes: 2_000,
+                    estimated_bytes: Some(800),
+                },
+            ],
+        })
+        .expect("preflight");
+
+        assert_eq!(
+            result.needed_bytes,
+            500 + 800 + DISK_HEADROOM_BYTES,
+            "sibling dirs on one volume must sum write estimates once"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
