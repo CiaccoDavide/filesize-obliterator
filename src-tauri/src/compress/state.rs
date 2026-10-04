@@ -43,7 +43,6 @@ pub fn apply_transition(
         (_, Transition::Progress { .. } | Transition::Complete | Transition::Fail) => {
             Err(TransitionError::NotRunning)
         }
-        (_, Transition::Cancel) => Err(TransitionError::NotCancellable),
     }
 }
 
