@@ -91,17 +91,23 @@ export function mergeJobRow(
   fromJob: ProgressRow,
 ): ProgressRow {
   const keepEventPhase = PHASE_RANK[existing.phase] > PHASE_RANK[fromJob.phase];
+  const phase = keepEventPhase ? existing.phase : fromJob.phase;
+  // FAILED must never retain a prior success outputPath (`??` would keep it).
+  const outputPath =
+    phase === "FAILED"
+      ? undefined
+      : (fromJob.outputPath ?? existing.outputPath);
   return {
     ...existing,
     ...fromJob,
     sourcePath: fromJob.sourcePath || existing.sourcePath,
     mediaKind: fromJob.mediaKind || existing.mediaKind,
     presetId: fromJob.presetId || existing.presetId,
-    phase: keepEventPhase ? existing.phase : fromJob.phase,
+    phase,
     percent: Math.max(existing.percent, fromJob.percent),
     bytesProcessed: fromJob.bytesProcessed ?? existing.bytesProcessed,
     bytesTotal: fromJob.bytesTotal ?? existing.bytesTotal,
-    outputPath: fromJob.outputPath ?? existing.outputPath,
+    outputPath,
     originalBytes: fromJob.originalBytes ?? existing.originalBytes,
     resultBytes: fromJob.resultBytes ?? existing.resultBytes,
     durationMs: fromJob.durationMs ?? existing.durationMs,

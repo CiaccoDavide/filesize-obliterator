@@ -113,32 +113,30 @@ export function dismissFailedRows(rows: ProgressRow[]): ProgressRow[] {
 }
 
 /**
- * Mark COMPRESSING rows as FAILED when last activity exceeds `stallMs`.
- * Incomplete outputs must never remain on a success path — clear outputPath.
+ * COMPRESSING video jobs silent longer than `stallMs`.
+ *
+ * Only video emits dense progress during encode; image/audio/pdf tick sparsely
+ * (e.g. 0 → 20 → 90), so silence there is not a stall signal.
+ * Callers must compressCancel these ids (mark ABORTING first) — never flip
+ * straight to FAILED while the backend may still hold reserved paths/.partial.
  */
-export function rowsAfterStallTimeout(
+export function stalledJobIds(
   rows: ProgressRow[],
   lastActivityMs: ReadonlyMap<string, number>,
   nowMs: number,
   stallMs: number,
-): ProgressRow[] {
-  let changed = false;
-  const next = rows.map((row) => {
-    if (row.phase !== "COMPRESSING") return row;
-    const last = lastActivityMs.get(row.jobId);
-    if (last === undefined) return row;
-    if (nowMs - last < stallMs) return row;
-    changed = true;
-    return {
-      ...row,
-      phase: "FAILED" as const,
-      error: STALL_ERROR,
-      outputPath: undefined,
-    };
-  });
-  return changed ? next : rows;
+): string[] {
+  return rows
+    .filter((row) => {
+      if (row.phase !== "COMPRESSING") return false;
+      if (row.mediaKind !== "video") return false;
+      const last = lastActivityMs.get(row.jobId);
+      if (last === undefined) return false;
+      return nowMs - last >= stallMs;
+    })
+    .map((row) => row.jobId);
 }
 
 export const ENCODER_STALL_ERROR = STALL_ERROR;
-/** Default stall window when progress events stop arriving. */
+/** Default stall window when video progress events stop arriving. */
 export const ENCODER_STALL_MS = 45_000;

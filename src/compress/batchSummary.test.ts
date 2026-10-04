@@ -4,7 +4,7 @@ import {
   dismissFailedRows,
   failedRowsForRetry,
   normalizeOpsError,
-  rowsAfterStallTimeout,
+  stalledJobIds,
   type BatchSummary,
 } from "./batchSummary";
 import type { ProgressRow } from "./progressState";
@@ -161,42 +161,111 @@ describe("failedRowsForRetry / dismissFailedRows", () => {
   });
 });
 
-describe("rowsAfterStallTimeout", () => {
-  it("fails COMPRESSING rows with no progress past the stall window", () => {
+describe("stalledJobIds", () => {
+  it("returns COMPRESSING video jobs silent past the stall window", () => {
     const now = 10_000;
     const stallMs = 5_000;
     const lastActivity = new Map<string, number>([
       ["job-stuck", 4_000],
       ["job-fresh", 8_000],
     ]);
-    const next = rowsAfterStallTimeout(
-      [
-        row({ jobId: "job-stuck", phase: "COMPRESSING", percent: 12 }),
-        row({ jobId: "job-fresh", phase: "COMPRESSING", percent: 40 }),
-        row({ jobId: "job-done", phase: "COMPLETE", percent: 100 }),
-      ],
-      lastActivity,
-      now,
-      stallMs,
-    );
-    expect(next.find((r) => r.jobId === "job-stuck")).toMatchObject({
-      phase: "FAILED",
-      error: "encoder stalled — no progress",
-      outputPath: undefined,
-    });
-    expect(next.find((r) => r.jobId === "job-fresh")?.phase).toBe("COMPRESSING");
-    expect(next.find((r) => r.jobId === "job-done")?.phase).toBe("COMPLETE");
+    expect(
+      stalledJobIds(
+        [
+          row({
+            jobId: "job-stuck",
+            phase: "COMPRESSING",
+            mediaKind: "video",
+            percent: 12,
+          }),
+          row({
+            jobId: "job-fresh",
+            phase: "COMPRESSING",
+            mediaKind: "video",
+            percent: 40,
+          }),
+          row({
+            jobId: "job-done",
+            phase: "COMPLETE",
+            mediaKind: "video",
+            percent: 100,
+          }),
+        ],
+        lastActivity,
+        now,
+        stallMs,
+      ),
+    ).toEqual(["job-stuck"]);
   });
 
-  it("does not stall AWAITING or ABORTING rows", () => {
+  it("does not stall AWAITING or ABORTING video rows", () => {
     const now = 10_000;
-    const lastActivity = new Map<string, number>([["job-wait", 0]]);
-    const next = rowsAfterStallTimeout(
-      [row({ jobId: "job-wait", phase: "AWAITING" })],
-      lastActivity,
-      now,
-      1,
-    );
-    expect(next[0].phase).toBe("AWAITING");
+    const lastActivity = new Map<string, number>([
+      ["job-wait", 0],
+      ["job-abort", 0],
+    ]);
+    expect(
+      stalledJobIds(
+        [
+          row({
+            jobId: "job-wait",
+            phase: "AWAITING",
+            mediaKind: "video",
+          }),
+          row({
+            jobId: "job-abort",
+            phase: "ABORTING",
+            mediaKind: "video",
+          }),
+        ],
+        lastActivity,
+        now,
+        1,
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not treat sparse image/audio/pdf silence as a stall", () => {
+    const now = 60_000;
+    const stallMs = 5_000;
+    const lastActivity = new Map<string, number>([
+      ["img", 1_000],
+      ["aud", 1_000],
+      ["pdf", 1_000],
+      ["vid", 1_000],
+    ]);
+    expect(
+      stalledJobIds(
+        [
+          row({
+            jobId: "img",
+            phase: "COMPRESSING",
+            mediaKind: "image",
+            percent: 20,
+          }),
+          row({
+            jobId: "aud",
+            phase: "COMPRESSING",
+            mediaKind: "audio",
+            percent: 20,
+          }),
+          row({
+            jobId: "pdf",
+            phase: "COMPRESSING",
+            mediaKind: "pdf",
+            percent: 20,
+          }),
+          row({
+            jobId: "vid",
+            phase: "COMPRESSING",
+            mediaKind: "video",
+            percent: 20,
+          }),
+        ],
+        lastActivity,
+        now,
+        stallMs,
+      ),
+    ).toEqual(["vid"]);
   });
 });

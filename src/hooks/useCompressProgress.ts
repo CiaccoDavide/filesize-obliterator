@@ -6,10 +6,11 @@ import {
 import {
   buildBatchSummary,
   dismissFailedRows,
+  ENCODER_STALL_ERROR,
   ENCODER_STALL_MS,
   failedRowsForRetry,
   normalizeOpsError,
-  rowsAfterStallTimeout,
+  stalledJobIds,
   type BatchSummary,
 } from "../compress/batchSummary";
 import {
@@ -71,6 +72,8 @@ export function useCompressProgress() {
   /** Jobs admitted by the current startStaged; abortAll always cancels these. */
   const admittedIdsRef = useRef<Set<string>>(new Set());
   const lastActivityRef = useRef<Map<string, number>>(new Map());
+  /** Stall cancels in flight — avoid double-cancel before ABORTING is committed. */
+  const stallCancelInFlightRef = useRef<Set<string>>(new Set());
   const lastOptionsRef = useRef<StartStagedOptions>({});
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
@@ -102,17 +105,43 @@ export function useCompressProgress() {
     };
   }, [touchActivity]);
 
-  // Stall watchdog — never leave COMPRESSING after encoder/process silence.
+  // Stall watchdog — cancel silent video jobs so reserved paths/.partial clean up.
+  // Mark ABORTING first so the batch stays non-terminal (RETRY stays off) until cancel settles.
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setRows((prev) =>
-        rowsAfterStallTimeout(
-          prev,
-          lastActivityRef.current,
-          Date.now(),
-          ENCODER_STALL_MS,
-        ),
-      );
+      const stalled = stalledJobIds(
+        rowsRef.current,
+        lastActivityRef.current,
+        Date.now(),
+        ENCODER_STALL_MS,
+      ).filter((id) => !stallCancelInFlightRef.current.has(id));
+      if (stalled.length === 0) return;
+
+      for (const id of stalled) stallCancelInFlightRef.current.add(id);
+      setRows((prev) => markAborting(prev, stalled));
+
+      void (async () => {
+        try {
+          const results = await Promise.allSettled(
+            stalled.map((id) => compressCancel(id)),
+          );
+          setRows((prev) => {
+            const afterCancel = applyCancelResults(prev, stalled, results);
+            const stalledSet = new Set(stalled);
+            return afterCancel.map((row) =>
+              stalledSet.has(row.jobId) && row.phase === "FAILED"
+                ? {
+                    ...row,
+                    error: ENCODER_STALL_ERROR,
+                    outputPath: undefined,
+                  }
+                : row,
+            );
+          });
+        } finally {
+          for (const id of stalled) stallCancelInFlightRef.current.delete(id);
+        }
+      })();
     }, 2_000);
     return () => window.clearInterval(timer);
   }, []);

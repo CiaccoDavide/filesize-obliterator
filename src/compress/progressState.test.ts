@@ -69,6 +69,46 @@ describe("upsertJob", () => {
     expect(next[0].phase).toBe("COMPRESSING");
     expect(next[0].percent).toBe(40);
   });
+
+  it("clears a prior success outputPath when upserting FAILED/cancelled JobInfo", () => {
+    const withOutput = [
+      row({
+        phase: "COMPLETE",
+        percent: 100,
+        outputPath: "/tmp/_compressed/a.webp",
+        resultBytes: 120,
+      }),
+    ];
+    const failed = upsertJob(
+      withOutput,
+      baseJob({
+        status: "failed",
+        percent: 40,
+        error: "encoder crashed",
+        outputPath: "/tmp/_compressed/a.webp",
+      }),
+    );
+    expect(failed[0]).toMatchObject({
+      phase: "FAILED",
+      error: "encoder crashed",
+      outputPath: undefined,
+    });
+
+    const cancelled = upsertJob(
+      withOutput,
+      baseJob({
+        status: "cancelled",
+        percent: 40,
+        error: "cancelled",
+        outputPath: "/tmp/_compressed/a.webp",
+      }),
+    );
+    expect(cancelled[0]).toMatchObject({
+      phase: "FAILED",
+      error: "cancelled",
+      outputPath: undefined,
+    });
+  });
 });
 
 describe("applyCompressEvent", () => {
@@ -292,6 +332,34 @@ describe("applyCancelResults", () => {
     expect(next[0].phase).toBe("FAILED");
     expect(next[0].error).toBe("cancelled");
     expect(deriveOpsPhase(next)).toBe("FAILED");
+  });
+
+  it("clears reserved outputPath when cancel settles to FAILED", () => {
+    const aborting = markAborting(
+      [
+        row({
+          phase: "COMPRESSING",
+          outputPath: "/tmp/_compressed/a.webp",
+        }),
+      ],
+      ["job-1"],
+    );
+    const next = applyCancelResults(aborting, ["job-1"], [
+      {
+        status: "fulfilled",
+        value: baseJob({
+          status: "cancelled",
+          percent: 20,
+          error: "cancelled",
+          outputPath: "/tmp/_compressed/a.webp",
+        }),
+      },
+    ]);
+    expect(next[0]).toMatchObject({
+      phase: "FAILED",
+      error: "cancelled",
+      outputPath: undefined,
+    });
   });
 
   it("marks FAILED on cancel rejection so rows never stick in ABORTING", () => {
