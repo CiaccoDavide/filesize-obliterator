@@ -1,7 +1,9 @@
 mod compress;
 mod intake;
 
-use compress::{compress_cancel, compress_list, compress_start, JobManager};
+use compress::{
+    compress_cancel, compress_list, compress_list_presets, compress_start, JobManager,
+};
 use intake::intake_resolve;
 use serde::Serialize;
 
@@ -36,6 +38,7 @@ pub fn run() {
             compress_start,
             compress_cancel,
             compress_list,
+            compress_list_presets,
             intake_resolve
         ])
         .run(tauri::generate_context!())

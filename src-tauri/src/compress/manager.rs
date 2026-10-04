@@ -8,10 +8,12 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
 
+use super::image_encode::encode_image;
 use super::output::prepare_output_path;
+use super::presets::image_preset;
 use super::state::{apply_transition, should_continue, Transition, TransitionError};
 use super::types::{
-    CompressEvent, CompressStartRequest, JobInfo, JobStatus, COMPRESS_EVENT,
+    CompressEvent, CompressStartRequest, JobInfo, JobStatus, MediaKind, COMPRESS_EVENT,
 };
 
 struct JobRecord {
@@ -88,12 +90,14 @@ impl JobManager {
         let manager = self.clone();
         let source_path = request.source_path;
         let preset_id = request.preset_id;
+        let media_kind = request.media_kind;
         thread::spawn(move || {
-            run_stub_job(
+            run_job(
                 manager,
                 app,
                 job_id,
                 source_path,
+                media_kind,
                 preset_id,
                 original_bytes,
                 cancel,
@@ -251,11 +255,51 @@ fn emit(app: &AppHandle, event: CompressEvent) {
     let _ = app.emit(COMPRESS_EVENT, event);
 }
 
-fn run_stub_job(
+fn fail_job(manager: &JobManager, app: &AppHandle, job_id: String, error: String) {
+    let _ = manager.mark_failed(&job_id, error.clone());
+    emit(
+        app,
+        CompressEvent::Failed {
+            job_id,
+            error,
+        },
+    );
+}
+
+fn cancel_job(manager: &JobManager, app: &AppHandle, job_id: String) {
+    let error = "cancelled".to_string();
+    let _ = manager.mark_failed(&job_id, error.clone());
+    let _ = manager.with_job(&job_id, |record| {
+        record.info.status = JobStatus::Cancelled;
+        record.info.error = Some(error.clone());
+        Ok(())
+    });
+    emit(
+        app,
+        CompressEvent::Failed {
+            job_id,
+            error,
+        },
+    );
+}
+
+fn resolve_output_ext(media_kind: &MediaKind, preset_id: &str) -> Result<&'static str, String> {
+    match media_kind {
+        MediaKind::Image => image_preset(preset_id)
+            .map(|p| p.output_ext())
+            .ok_or_else(|| format!("unknown image preset: {preset_id}")),
+        // Audio/video/pdf encoders arrive in later tasks — stub extension for now.
+        _ => Ok("stub"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_job(
     manager: JobManager,
     app: AppHandle,
     job_id: String,
     source_path: String,
+    media_kind: MediaKind,
     preset_id: String,
     original_bytes: u64,
     cancel: Arc<AtomicBool>,
@@ -268,38 +312,35 @@ fn run_stub_job(
         } else {
             e
         };
-        let _ = manager.mark_failed(&job_id, error.clone());
-        emit(
-            &app,
-            CompressEvent::Failed {
-                job_id,
-                error,
-            },
-        );
+        fail_job(&manager, &app, job_id, error);
         return;
     }
 
+    let output_ext = match resolve_output_ext(&media_kind, &preset_id) {
+        Ok(ext) => ext,
+        Err(error) => {
+            fail_job(&manager, &app, job_id, error);
+            return;
+        }
+    };
+
+    let encoder_label = match media_kind {
+        MediaKind::Image => "image",
+        _ => "stub",
+    };
     emit(
         &app,
         CompressEvent::Log {
             job_id: job_id.clone(),
-            message: format!("stub encoder started ({preset_id})"),
+            message: format!("{encoder_label} encoder started ({preset_id})"),
         },
     );
 
     let source = PathBuf::from(&source_path);
-    // Stub codec extension; real encoders pass their output ext / preset slug.
-    let output_path = match prepare_output_path(&source, "stub") {
+    let output_path = match prepare_output_path(&source, output_ext) {
         Ok(path) => path,
         Err(error) => {
-            let _ = manager.mark_failed(&job_id, error.clone());
-            emit(
-                &app,
-                CompressEvent::Failed {
-                    job_id,
-                    error,
-                },
-            );
+            fail_job(&manager, &app, job_id, error);
             return;
         }
     };
@@ -321,36 +362,13 @@ fn run_stub_job(
         let _ = fs::remove_file(&output_path);
     };
 
-    let steps = [0.0_f64, 20.0, 40.0, 60.0, 80.0, 100.0];
-    for percent in steps {
+    let report_progress = |percent: f64| -> bool {
         if cancel.load(Ordering::SeqCst) || manager.is_cancel_requested(&job_id) {
-            release_reserved();
-            let error = "cancelled".to_string();
-            let _ = manager.mark_failed(&job_id, error.clone());
-            // Ensure list status is Cancelled even if cancel raced after start.
-            let _ = manager.with_job(&job_id, |record| {
-                record.info.status = JobStatus::Cancelled;
-                record.info.error = Some(error.clone());
-                Ok(())
-            });
-            emit(
-                &app,
-                CompressEvent::Failed {
-                    job_id: job_id.clone(),
-                    error,
-                },
-            );
-            return;
+            return false;
         }
-
-        if !manager
-            .mark_progress(&job_id, percent)
-            .unwrap_or(false)
-        {
-            release_reserved();
-            return;
+        if !manager.mark_progress(&job_id, percent).unwrap_or(false) {
+            return false;
         }
-
         let bytes_processed = ((percent / 100.0) * original_bytes as f64) as u64;
         emit(
             &app,
@@ -361,64 +379,84 @@ fn run_stub_job(
                 bytes_total: Some(original_bytes),
             },
         );
+        true
+    };
 
-        // Simulate work; short so unit-ish manual runs stay snappy.
-        thread::sleep(Duration::from_millis(40));
+    if !report_progress(0.0) {
+        release_reserved();
+        cancel_job(&manager, &app, job_id);
+        return;
+    }
+
+    let encode_result = match media_kind {
+        MediaKind::Image => {
+            if !report_progress(20.0) {
+                release_reserved();
+                cancel_job(&manager, &app, job_id);
+                return;
+            }
+            let result = encode_image(&source, &preset_id, &partial_path);
+            if result.is_ok() && !report_progress(90.0) {
+                release_reserved();
+                cancel_job(&manager, &app, job_id);
+                return;
+            }
+            result
+        }
+        _ => run_stub_encode(&manager, &job_id, &cancel, &partial_path, report_progress),
+    };
+
+    if let Err(error) = encode_result {
+        release_reserved();
+        if error == "cancelled" {
+            cancel_job(&manager, &app, job_id);
+        } else {
+            fail_job(&manager, &app, job_id, error);
+        }
+        return;
     }
 
     if cancel.load(Ordering::SeqCst) || manager.is_cancel_requested(&job_id) {
         release_reserved();
-        let error = "cancelled".to_string();
-        let _ = manager.mark_failed(&job_id, error.clone());
-        let _ = manager.with_job(&job_id, |record| {
-            record.info.status = JobStatus::Cancelled;
-            record.info.error = Some(error.clone());
-            Ok(())
-        });
-        emit(
-            &app,
-            CompressEvent::Failed {
-                job_id,
-                error,
-            },
-        );
+        cancel_job(&manager, &app, job_id);
         return;
     }
 
-    // Tiny stub "compressed" payload — real encoders land in later tasks.
-    let stub_bytes = b"fo-stub\n";
-    if let Err(e) = fs::write(&partial_path, stub_bytes) {
-        release_reserved();
-        let error = format!("write failed: {e}");
-        let _ = manager.mark_failed(&job_id, error.clone());
-        emit(
-            &app,
-            CompressEvent::Failed {
+    let payload = match fs::read(&partial_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            release_reserved();
+            fail_job(
+                &manager,
+                &app,
                 job_id,
-                error,
-            },
-        );
-        return;
-    }
+                format!("read partial failed: {e}"),
+            );
+            return;
+        }
+    };
 
     // Promote into the reserved final path (overwrite placeholder). Avoid rename-over-existing
     // so Windows and Unix behave the same while the reservation stays exclusive.
-    if let Err(e) = fs::write(&output_path, stub_bytes) {
+    if let Err(e) = fs::write(&output_path, &payload) {
         release_reserved();
-        let error = format!("finalize failed: {e}");
-        let _ = manager.mark_failed(&job_id, error.clone());
-        emit(
+        fail_job(
+            &manager,
             &app,
-            CompressEvent::Failed {
-                job_id,
-                error,
-            },
+            job_id,
+            format!("finalize failed: {e}"),
         );
         return;
     }
     let _ = fs::remove_file(&partial_path);
 
-    let result_bytes = stub_bytes.len() as u64;
+    if !report_progress(100.0) {
+        let _ = fs::remove_file(&output_path);
+        cancel_job(&manager, &app, job_id);
+        return;
+    }
+
+    let result_bytes = payload.len() as u64;
     let duration_ms = started.elapsed().as_millis() as u64;
     let output_str = output_path.to_string_lossy().into_owned();
 
@@ -433,7 +471,7 @@ fn run_stub_job(
                 &app,
                 CompressEvent::Log {
                     job_id: job_id.clone(),
-                    message: "stub encoder finished".into(),
+                    message: format!("{encoder_label} encoder finished"),
                 },
             );
             emit(
@@ -450,33 +488,37 @@ fn run_stub_job(
         Ok(false) => {
             // Cancel won the race after write — do not leave success path artifacts.
             let _ = fs::remove_file(&output_path);
-            let error = "cancelled".to_string();
-            let _ = manager.mark_failed(&job_id, error.clone());
-            let _ = manager.with_job(&job_id, |record| {
-                record.info.status = JobStatus::Cancelled;
-                record.info.error = Some(error.clone());
-                Ok(())
-            });
-            emit(
-                &app,
-                CompressEvent::Failed {
-                    job_id,
-                    error,
-                },
-            );
+            cancel_job(&manager, &app, job_id);
         }
         Err(e) => {
             let _ = fs::remove_file(&output_path);
-            let _ = manager.mark_failed(&job_id, e.clone());
-            emit(
-                &app,
-                CompressEvent::Failed {
-                    job_id,
-                    error: e,
-                },
-            );
+            fail_job(&manager, &app, job_id, e);
         }
     }
+}
+
+/// Placeholder encoder for non-image kinds until their tasks land.
+fn run_stub_encode(
+    manager: &JobManager,
+    job_id: &str,
+    cancel: &AtomicBool,
+    partial_path: &Path,
+    mut report_progress: impl FnMut(f64) -> bool,
+) -> Result<(), String> {
+    let steps = [20.0_f64, 40.0, 60.0, 80.0];
+    for percent in steps {
+        if cancel.load(Ordering::SeqCst) || manager.is_cancel_requested(job_id) {
+            return Err("cancelled".into());
+        }
+        if !report_progress(percent) {
+            return Err("cancelled".into());
+        }
+        thread::sleep(Duration::from_millis(40));
+    }
+
+    let stub_bytes = b"fo-stub\n";
+    fs::write(partial_path, stub_bytes).map_err(|e| format!("write failed: {e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]

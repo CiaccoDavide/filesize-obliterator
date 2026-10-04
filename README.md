@@ -45,6 +45,18 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 Folder drops expand one level of immediate files (nested directories are ignored).
 
+## Image compression (offline)
+
+Still images are compressed locally with Rust codecs (no cloud APIs). Built-in presets:
+
+| Id | Label | Output | Notes |
+|----|-------|--------|-------|
+| `image-high` | High | `.jpg` | Quality-first (~q90); may not shrink already-optimized JPEGs |
+| `image-balanced` | Balanced | `.webp` | Default tradeoff (~q75) |
+| `image-small` | Small | `.webp` | Size-first (~q45) |
+
+Supported inputs: JPEG, PNG, WebP. **HEIC/HEIF** is not supported in this build (no offline decoder bundled). Outputs land beside the source under `_compressed/`.
+
 ## Layout
 
 | Path | Role |
