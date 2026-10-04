@@ -249,6 +249,13 @@ textarea {
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .hud-tick {
+    animation: none;
+    opacity: 1;
+  }
+}
+
 /* Mono utility */
 .mono {
   font-family: var(--font-mono);

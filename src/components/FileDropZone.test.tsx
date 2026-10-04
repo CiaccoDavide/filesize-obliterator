@@ -32,6 +32,14 @@ describe("FileDropZone", () => {
     expect((zone as HTMLElement).tabIndex).toBe(-1);
   });
 
+  it("arms the drop zone class while drag is active", () => {
+    render(<FileDropZone dragActive={true} onPick={() => {}} />);
+    const zone = host.querySelector('[data-testid="drop-zone"]');
+    expect(zone).not.toBeNull();
+    expect(zone!.classList.contains("drop-zone-active")).toBe(true);
+    expect(zone!.getAttribute("data-active")).toBe("true");
+  });
+
   it("activates via Browse button with an accessible name", () => {
     const onPick = vi.fn();
     render(<FileDropZone dragActive={false} onPick={onPick} />);
