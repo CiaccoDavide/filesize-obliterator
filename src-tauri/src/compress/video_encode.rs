@@ -123,10 +123,11 @@ fn parse_hhmmss(token: &str) -> Option<f64> {
 }
 
 fn parse_out_time_secs(line: &str) -> Option<f64> {
-    // out_time_ms=1234567  or out_time_us=1234567890  or out_time=00:00:01.234567
+    // ffmpeg -progress: out_time_ms is microseconds despite the name (same unit as out_time_us).
+    // Also: out_time_us=<µs> and out_time=HH:MM:SS.micro.
     if let Some(v) = line.strip_prefix("out_time_ms=") {
-        let ms: f64 = v.trim().parse().ok()?;
-        return Some(ms / 1000.0);
+        let us: f64 = v.trim().parse().ok()?;
+        return Some(us / 1_000_000.0);
     }
     if let Some(v) = line.strip_prefix("out_time_us=") {
         let us: f64 = v.trim().parse().ok()?;
@@ -156,6 +157,9 @@ fn build_ffmpeg_args(source: &Path, dest: &Path, target: &VideoEncodeTarget) -> 
         format!("{}k", target.audio_kbps),
         "-movflags".into(),
         "+faststart".into(),
+        // Denser than the default ~0.5s so short encodes still emit mid-progress ticks.
+        "-stats_period".into(),
+        "0.2".into(),
         "-progress".into(),
         "pipe:1".into(),
         "-nostats".into(),
@@ -391,8 +395,43 @@ mod tests {
     fn parses_duration_and_progress_lines() {
         let stderr = "  Duration: 00:00:03.50, start: 0.000000, bitrate: 100 kb/s\n";
         assert!((parse_duration_from_ffmpeg_stderr(stderr).unwrap() - 3.5).abs() < 0.01);
-        assert!((parse_out_time_secs("out_time_ms=1500").unwrap() - 1.5).abs() < 0.01);
+        // out_time_ms uses microseconds (same numeric scale as out_time_us).
+        assert!((parse_out_time_secs("out_time_ms=1500000").unwrap() - 1.5).abs() < 0.01);
         assert!((parse_out_time_secs("out_time_us=2500000").unwrap() - 2.5).abs() < 0.01);
+        assert!((parse_out_time_secs("out_time=00:00:01.234567").unwrap() - 1.234567).abs() < 1e-6);
+        // Mis-parsing ms as milliseconds would turn 2s of encode into ~2000s → 99% instantly.
+        let two_secs = parse_out_time_secs("out_time_ms=2000000").unwrap();
+        assert!((two_secs - 2.0).abs() < 0.01, "got {two_secs}");
+    }
+
+    #[test]
+    fn out_time_ms_percent_increases_instead_of_jumping_to_99() {
+        let duration = 10.0_f64;
+        let samples_us = [1_000_000_f64, 4_000_000.0, 7_000_000.0, 9_500_000.0];
+        let mut percents = Vec::new();
+        for us in samples_us {
+            let line = format!("out_time_ms={us}");
+            let out_secs = parse_out_time_secs(&line).unwrap();
+            percents.push(((out_secs / duration) * 100.0).clamp(0.0, 99.0));
+        }
+        assert!(
+            (percents[0] - 10.0).abs() < 0.01 && (percents[1] - 40.0).abs() < 0.01,
+            "got {percents:?}"
+        );
+        assert!(
+            percents.windows(2).all(|w| w[1] > w[0]),
+            "progress must increase across out_time_ms samples, got {percents:?}"
+        );
+        assert!(
+            percents.iter().any(|&p| p < 90.0),
+            "must include a true mid-encode value, got {percents:?}"
+        );
+        // Document the old bug: treating out_time_ms as milliseconds clamps every sample to 99%.
+        let buggy: Vec<f64> = samples_us
+            .iter()
+            .map(|us| ((us / 1000.0 / duration) * 100.0).clamp(0.0, 99.0))
+            .collect();
+        assert!(buggy.iter().all(|&p| (p - 99.0).abs() < 0.01), "got {buggy:?}");
     }
 
     #[test]
@@ -441,12 +480,44 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Heavier source so ffmpeg emits multiple `-progress` out_time samples (tiny
+    /// fixtures often finish in one tick and only surface the terminal percent).
+    fn write_progress_fixture_mp4(path: &Path) {
+        let ffmpeg = require_ffmpeg();
+        let status = Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=1280x720:rate=30:duration=6",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=6",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ])
+            .arg(path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("spawn ffmpeg for progress fixture");
+        assert!(status.success(), "progress fixture encode failed");
+    }
+
     #[test]
     fn encodes_mp4_for_each_preset_with_mid_progress() {
         require_ffmpeg();
         let dir = temp_dir("roundtrip");
         let src = dir.join("tone.mp4");
-        write_fixture_mp4(&src, 1.5);
+        write_progress_fixture_mp4(&src);
 
         for preset in [VIDEO_HIGH, VIDEO_BALANCED, VIDEO_SMALL] {
             let out = dir.join(format!("{preset}.mp4"));
@@ -462,8 +533,21 @@ mod tests {
             let progress = seen.lock().unwrap().clone();
             assert!(
                 progress.iter().any(|&p| p > 0.0 && p < 100.0),
-                "{preset} should emit mid-encode progress, got {progress:?}"
+                "{preset} should emit progress, got {progress:?}"
             );
+            // veryfast (video-small) can finish in one progress tick on fast hosts; require
+            // increasing mid-encode samples on the slower presets where ffmpeg emits several.
+            if preset != VIDEO_SMALL {
+                let before_end: Vec<f64> = progress.iter().copied().filter(|&p| p < 99.0).collect();
+                assert!(
+                    before_end.iter().any(|&p| p > 0.0 && p < 90.0),
+                    "{preset} should emit genuine mid-encode progress (<90%), not jump to 99%; got {progress:?}"
+                );
+                assert!(
+                    before_end.len() >= 2 && before_end.windows(2).any(|w| w[1] > w[0] + 0.5),
+                    "{preset} mid-progress should increase during encode, got {progress:?}"
+                );
+            }
         }
         let _ = fs::remove_dir_all(&dir);
     }
@@ -558,7 +642,7 @@ mod tests {
         require_ffmpeg();
         let dir = temp_dir("cancel-mid");
         let src = dir.join("long.mp4");
-        write_fixture_mp4(&src, 4.0);
+        write_progress_fixture_mp4(&src);
         let out = dir.join("out.mp4");
         let cancel = AtomicBool::new(false);
         let mut ticks = 0u32;
@@ -566,12 +650,13 @@ mod tests {
             ticks += 1;
             if ticks >= 2 {
                 cancel.store(true, Ordering::SeqCst);
+                return false;
             }
             true
         };
         let err = encode_video(
             &src,
-            VIDEO_SMALL,
+            VIDEO_HIGH,
             &out,
             Some(&cancel),
             Some(&mut on_progress),
