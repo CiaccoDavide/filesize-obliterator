@@ -1,0 +1,45 @@
+{
+  "issue": 31,
+  "task": "031-extended-format-coverage",
+  "branch": "ship/31-extended-formats",
+  "base": "origin/main",
+  "closes": "#31",
+  "status": "implemented",
+  "acceptance": [
+    {
+      "id": "gif-or-heic-offline-macos",
+      "met": true,
+      "via": "Animated GIF → animated WebP (bundled gif + webp AnimEncoder); HEIC via macOS sips when available"
+    },
+    {
+      "id": "unsupported-clear-errors",
+      "met": true,
+      "via": "AVIF/HEIC-unavailable → unsupported image format…; AVI/etc stay clear video rejects"
+    },
+    {
+      "id": "readme-supported-formats",
+      "met": true,
+      "via": "README ### Supported formats (offline) table + video container list"
+    },
+    {
+      "id": "intake-kind-detection",
+      "met": true,
+      "via": "detectKind covers gif/tiff/heic/heif/bmp + 3gp/ts/m2ts; kinds.test.ts"
+    }
+  ],
+  "choices": {
+    "animatedGifOutput": "animated-webp",
+    "heic": "macos-sips",
+    "tiffBmp": "image-crate-decode",
+    "extraVideoContainers": ["3gp", "3g2", "ts", "mts", "m2ts"]
+  },
+  "platformNotes": {
+    "macos": "HEIC/HEIF decode via local sips/ImageIO; GIF animation always available",
+    "windows": "HEIC unsupported (clear error); GIF/TIFF/BMP bundled",
+    "linux": "HEIC unsupported (clear error); GIF/TIFF/BMP bundled"
+  },
+  "notes": [
+    "GIF inputs always reserve .webp output (including image-high).",
+    "No libheif/AVIF bundle; camera RAW out of scope."
+  ]
+}

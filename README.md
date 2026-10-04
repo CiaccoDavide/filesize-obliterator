@@ -55,7 +55,18 @@ Still images are compressed locally with Rust codecs (no cloud APIs). Built-in p
 | `image-balanced` | Balanced | `.webp` | Default tradeoff (~q75) |
 | `image-small` | Small | `.webp` | Size-first (~q45) |
 
-Supported inputs: JPEG, PNG, WebP. **HEIC/HEIF** is not supported in this build (no offline decoder bundled). Outputs land beside the source under `_compressed/`.
+### Supported formats (offline)
+
+| Kind | Supported inputs | Notes |
+|------|------------------|-------|
+| Image | JPEG, PNG, WebP, GIF, TIFF, BMP | Animated **GIF → animated WebP** (not MP4). Still GIF/TIFF/BMP use the selected image preset. |
+| Image (platform) | HEIC/HEIF | **macOS:** decoded offline via `sips` / ImageIO when present. **Windows/Linux:** clear unsupported error (no libheif bundle). |
+| Image (rejected) | AVIF | Clear unsupported error (no offline decoder). |
+| Audio | MP3, WAV, AAC, M4A, FLAC | See audio section. |
+| Video | MP4, WebM, MKV, MOV, M4V, 3GP, 3G2, MPEG-TS (`.ts` / `.mts` / `.m2ts`) | Demuxers permitting via local ffmpeg. AVI/MPEG/WMV/FLV rejected clearly. |
+| PDF | PDF | See PDF section. |
+
+Outputs land beside the source under `_compressed/`.
 
 ### Metadata (`stripMetadata`)
 
@@ -91,7 +102,7 @@ Video is re-encoded locally with **ffmpeg** (H.264 + AAC → `.mp4`). The binary
 | `video-balanced` | Balanced | `.mp4` | CRF 23, ≤1080p; default tradeoff |
 | `video-small` | Social small | `.mp4` | CRF 28, ≤720p; size-first for sharing |
 
-**Supported input containers:** MP4, WebM, MKV, MOV, M4V (demuxers permitting). AVI/MPEG/WMV are rejected as unsupported in this build. Long encodes emit progress during the run; cancel cooperatively stops ffmpeg. Outputs land beside the source under `_compressed/`; the source file is never modified.
+**Supported input containers:** MP4, WebM, MKV, MOV, M4V, 3GP/3G2, MPEG-TS (`.ts` / `.mts` / `.m2ts`) where the local ffmpeg build demuxes them. AVI/MPEG/WMV/FLV are rejected as unsupported in this build. Long encodes emit progress during the run; cancel cooperatively stops ffmpeg. Outputs land beside the source under `_compressed/`; the source file is never modified.
 
 ## PDF compression (offline)
 

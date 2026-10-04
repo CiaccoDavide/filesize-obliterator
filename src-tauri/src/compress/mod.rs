@@ -1,4 +1,5 @@
 mod audio_encode;
+mod format_support;
 mod image_encode;
 mod manager;
 mod output;
@@ -7,6 +8,8 @@ mod presets;
 mod state;
 mod types;
 mod video_encode;
+
+pub use format_support::{image_format_capabilities, FormatAvailability, FormatCapability};
 
 pub use manager::JobManager;
 pub use presets::{all_presets, presets_for_kind, PresetInfo};

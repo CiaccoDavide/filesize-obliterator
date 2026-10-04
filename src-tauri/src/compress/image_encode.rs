@@ -1,6 +1,10 @@
-//! Offline still-image encode (JPEG / PNG / WebP decode; JPEG / WebP encode).
+//! Offline still-image encode (JPEG / PNG / WebP / GIF / TIFF / BMP decode; JPEG / WebP encode).
 //!
-//! HEIC/HEIF is not supported — fail with a clear error (no cloud decode).
+//! Extended formats:
+//! - **GIF:** still → JPEG/WebP; animated → animated WebP (documented choice; never MP4).
+//! - **TIFF / BMP:** still decode via bundled codecs.
+//! - **HEIC/HEIF:** macOS `sips` / ImageIO when available; clear error elsewhere.
+//! - **AVIF:** unsupported (no offline decoder).
 //!
 //! Metadata:
 //! - `strip_metadata = true`: bake EXIF orientation into pixels, emit no EXIF/GPS.
@@ -8,30 +12,42 @@
 //!   WebP bakes orientation into pixels (container EXIF not written by the WebP path).
 
 use std::fs::File;
-use std::io::BufWriter;
-use std::path::Path;
+use std::io::{BufReader, BufWriter};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
-use image::codecs::jpeg::JpegEncoder;
+use image::codecs::gif::GifDecoder;
+use image::imageops::FilterType;
 use image::metadata::Orientation;
-use image::{DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, ImageReader};
+use image::{
+    AnimationDecoder, DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, ImageReader,
+    RgbaImage,
+};
+use image::codecs::jpeg::JpegEncoder;
+use webp::{AnimEncoder, AnimFrame, WebPConfig};
 
+use super::format_support::{
+    extension_lower, heic_decode_available, heic_capability_note, image_format_rejection,
+    resolve_sips,
+};
 use super::presets::{image_preset, ImageEncodeTarget};
 
-fn extension_lower(path: &Path) -> String {
-    path.extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
+fn reject_unsupported_container(path: &Path) -> Result<(), String> {
+    let ext = extension_lower(path);
+    if let Some(err) = image_format_rejection(&ext) {
+        return Err(err);
+    }
+    Ok(())
 }
 
-fn reject_unsupported_container(path: &Path) -> Result<(), String> {
-    match extension_lower(path).as_str() {
-        "heic" | "heif" | "avif" => Err(format!(
-            "unsupported image format '.{}' (offline decoder not bundled)",
-            extension_lower(path)
-        )),
-        _ => Ok(()),
+/// Output extension for an image job. Animated (and all) GIF inputs always produce `.webp`.
+pub fn resolve_image_output_ext(source: &Path, preset_id: &str) -> Result<&'static str, String> {
+    let preset = image_preset(preset_id)
+        .ok_or_else(|| format!("unknown image preset: {preset_id}"))?;
+    if extension_lower(source) == "gif" {
+        return Ok("webp");
     }
+    Ok(preset.output_ext())
 }
 
 fn open_image(source: &Path) -> Result<(DynamicImage, Orientation, Option<Vec<u8>>), String> {
@@ -88,10 +104,149 @@ fn encode_webp(img: &DynamicImage, quality: f32, dest: &Path) -> Result<(), Stri
     Ok(())
 }
 
-/// Compress `source` with a registered image preset into `dest`.
-///
-/// Corrupt or unsupported inputs return `Err` — never panics.
-pub fn encode_image(
+fn webp_quality_for_preset(target: ImageEncodeTarget) -> f32 {
+    match target {
+        ImageEncodeTarget::Jpeg { quality } => quality as f32,
+        ImageEncodeTarget::Webp { quality } => quality,
+    }
+}
+
+fn decode_heic_to_temp_png(source: &Path) -> Result<PathBuf, String> {
+    if !heic_decode_available() {
+        return Err(format!(
+            "unsupported image format '.{}' ({})",
+            extension_lower(source),
+            heic_capability_note()
+        ));
+    }
+    let sips = resolve_sips().ok_or_else(|| {
+        format!(
+            "unsupported image format '.{}' ({})",
+            extension_lower(source),
+            heic_capability_note()
+        )
+    })?;
+
+    let tmp = std::env::temp_dir().join(format!(
+        "fo-heic-{}-{}.png",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+
+    let output = Command::new(&sips)
+        .args(["-s", "format", "png"])
+        .arg(source)
+        .arg("--out")
+        .arg(&tmp)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("unsupported or corrupt image: sips failed to start ({e})"))?;
+
+    if !output.status.success() || !tmp.is_file() {
+        let _ = std::fs::remove_file(&tmp);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "unsupported or corrupt image: HEIC decode failed via sips ({})",
+            stderr.trim()
+        ));
+    }
+    Ok(tmp)
+}
+
+struct GifFrameData {
+    rgba: RgbaImage,
+    /// Cumulative timestamp in ms for WebP anim encoder.
+    timestamp_ms: i32,
+}
+
+fn load_gif_frames(source: &Path) -> Result<(u32, u32, Vec<GifFrameData>), String> {
+    let file = File::open(source).map_err(|e| format!("unsupported or corrupt image: {e}"))?;
+    let decoder = GifDecoder::new(BufReader::new(file))
+        .map_err(|e| format!("unsupported or corrupt image: {e}"))?;
+    let (width, height) = decoder.dimensions();
+    let frames = decoder
+        .into_frames()
+        .collect_frames()
+        .map_err(|e| format!("unsupported or corrupt image: {e}"))?;
+    if frames.is_empty() {
+        return Err("unsupported or corrupt image: GIF has no frames".into());
+    }
+
+    let mut out = Vec::with_capacity(frames.len());
+    let mut t_ms: i32 = 0;
+    for frame in frames {
+        let (numer, denom) = frame.delay().numer_denom_ms();
+        let ms = if denom == 0 {
+            100i32
+        } else {
+            (f64::from(numer) / f64::from(denom))
+                .round()
+                .clamp(10.0, 10_000.0) as i32
+        };
+        t_ms = t_ms.saturating_add(ms);
+        out.push(GifFrameData {
+            rgba: frame.into_buffer(),
+            timestamp_ms: t_ms,
+        });
+    }
+    let w = out[0].rgba.width().max(width);
+    let h = out[0].rgba.height().max(height);
+    Ok((w, h, out))
+}
+
+fn encode_animated_webp(frames: &[GifFrameData], width: u32, height: u32, quality: f32, dest: &Path) -> Result<(), String> {
+    if frames.is_empty() {
+        return Err("unsupported or corrupt image: GIF has no frames".into());
+    }
+    let mut config = WebPConfig::new().map_err(|_| "webp encode failed: config init".to_string())?;
+    config.lossless = 0;
+    config.quality = quality.clamp(0.0, 100.0);
+    config.alpha_compression = 1;
+
+    let mut encoder = AnimEncoder::new(width, height, &config);
+    encoder.set_loop_count(0);
+
+    // AnimFrame borrows pixel buffers — keep resized copies in this scope.
+    let mut owned: Vec<RgbaImage> = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let rgba = if frame.rgba.width() == width && frame.rgba.height() == height {
+            frame.rgba.clone()
+        } else {
+            image::imageops::resize(&frame.rgba, width, height, FilterType::Triangle)
+        };
+        owned.push(rgba);
+    }
+    for (i, rgba) in owned.iter().enumerate() {
+        let ts = frames[i].timestamp_ms;
+        encoder.add_frame(AnimFrame::from_rgba(rgba.as_raw(), width, height, ts));
+    }
+
+    let encoded = encoder
+        .try_encode()
+        .map_err(|e| format!("webp anim encode failed: {e:?}"))?;
+    std::fs::write(dest, &*encoded).map_err(|e| format!("cannot write output: {e}"))?;
+    Ok(())
+}
+
+fn encode_gif(source: &Path, preset_id: &str, dest: &Path) -> Result<(), String> {
+    let preset = image_preset(preset_id)
+        .ok_or_else(|| format!("unknown image preset: {preset_id}"))?;
+    let quality = webp_quality_for_preset(preset.target);
+    let (width, height, frames) = load_gif_frames(source)?;
+
+    if frames.len() == 1 {
+        let img = DynamicImage::ImageRgba8(frames[0].rgba.clone());
+        return encode_webp(&img, quality, dest);
+    }
+
+    encode_animated_webp(&frames, width, height, quality, dest)
+}
+
+fn encode_still_from_path(
     source: &Path,
     preset_id: &str,
     dest: &Path,
@@ -99,7 +254,6 @@ pub fn encode_image(
 ) -> Result<(), String> {
     let preset = image_preset(preset_id)
         .ok_or_else(|| format!("unknown image preset: {preset_id}"))?;
-    reject_unsupported_container(source)?;
 
     let (mut img, orientation, exif) = open_image(source)?;
 
@@ -122,6 +276,34 @@ pub fn encode_image(
     Ok(())
 }
 
+/// Compress `source` with a registered image preset into `dest`.
+///
+/// Corrupt or unsupported inputs return `Err` — never panics.
+pub fn encode_image(
+    source: &Path,
+    preset_id: &str,
+    dest: &Path,
+    strip_metadata: bool,
+) -> Result<(), String> {
+    let _preset = image_preset(preset_id)
+        .ok_or_else(|| format!("unknown image preset: {preset_id}"))?;
+    reject_unsupported_container(source)?;
+
+    let ext = extension_lower(source);
+    if ext == "gif" {
+        return encode_gif(source, preset_id, dest);
+    }
+
+    if ext == "heic" || ext == "heif" {
+        let tmp = decode_heic_to_temp_png(source)?;
+        let result = encode_still_from_path(&tmp, preset_id, dest, strip_metadata);
+        let _ = std::fs::remove_file(&tmp);
+        return result;
+    }
+
+    encode_still_from_path(source, preset_id, dest, strip_metadata)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +311,7 @@ mod tests {
     use image::{ImageBuffer, Rgba};
     use std::fs;
     use std::path::PathBuf;
+    use webp::AnimDecoder;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -169,6 +352,39 @@ mod tests {
             Rgba([r, g, b, 255])
         });
         img.save(path).expect("save photo-like png");
+    }
+
+    fn write_gradient_tiff(path: &Path, w: u32, h: u32) {
+        let img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_fn(w, h, |x, y| {
+            Rgba([
+                (x % 256) as u8,
+                (y % 256) as u8,
+                ((x + y) % 256) as u8,
+                255,
+            ])
+        });
+        img.save(path).expect("save tiff");
+    }
+
+    fn write_animated_gif(path: &Path, w: u32, h: u32) {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        use image::Frame;
+        use std::time::Duration;
+
+        let file = File::create(path).expect("gif file");
+        let mut encoder = GifEncoder::new(file);
+        encoder.set_repeat(Repeat::Infinite).expect("repeat");
+        for (i, color) in [[255, 0, 0, 255], [0, 0, 255, 255]].into_iter().enumerate() {
+            let img: RgbaImage = ImageBuffer::from_fn(w, h, |x, y| {
+                if (x + y + i as u32) % 2 == 0 {
+                    Rgba(color)
+                } else {
+                    Rgba([0, 0, 0, 255])
+                }
+            });
+            let frame = Frame::from_parts(img, 0, 0, image::Delay::from_saturating_duration(Duration::from_millis(100)));
+            encoder.encode_frame(frame).expect("gif frame");
+        }
     }
 
     /// Minimal big-endian TIFF/EXIF payload: Orientation=6 + GPS IFD with LatitudeRef=N.
@@ -272,6 +488,88 @@ mod tests {
     }
 
     #[test]
+    fn encodes_tiff_input() {
+        let dir = temp_dir("tiff");
+        let tiff = dir.join("scan.tiff");
+        write_gradient_tiff(&tiff, 48, 48);
+        let out = dir.join("scan.webp");
+        encode_image(&tiff, IMAGE_BALANCED, &out, true).expect("tiff encode");
+        assert!(out.is_file());
+        assert!(fs::metadata(&out).unwrap().len() > 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn animated_gif_encodes_to_animated_webp() {
+        let dir = temp_dir("anim-gif");
+        let gif = dir.join("blink.gif");
+        write_animated_gif(&gif, 24, 24);
+        assert_eq!(
+            resolve_image_output_ext(&gif, IMAGE_HIGH).unwrap(),
+            "webp",
+            "GIF always outputs webp"
+        );
+
+        let out = dir.join("blink.webp");
+        encode_image(&gif, IMAGE_SMALL, &out, true).expect("gif→webp");
+        assert!(out.is_file());
+        let bytes = fs::read(&out).expect("read webp");
+        let decoded = AnimDecoder::new(&bytes)
+            .decode()
+            .expect("animated webp should decode");
+        let frame_count = (&decoded).into_iter().count();
+        assert!(
+            frame_count >= 2,
+            "expected animated webp with ≥2 frames, got {frame_count}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn heic_path_macos_or_clear_error() {
+        let dir = temp_dir("heic");
+        let heic = dir.join("shot.heic");
+        let out = dir.join("out.jpg");
+
+        if heic_decode_available() {
+            // Build a real HEIC via sips from a PNG fixture (macOS only).
+            let png = dir.join("shot.png");
+            write_gradient_png(&png, 32, 32);
+            let sips = resolve_sips().expect("sips");
+            let status = Command::new(&sips)
+                .args(["-s", "format", "heic"])
+                .arg(&png)
+                .arg("--out")
+                .arg(&heic)
+                .status()
+                .expect("sips heic write");
+            if !status.success() || !heic.is_file() {
+                // Some macOS builds cannot write HEIC — fall back to clear-error probe.
+                fs::write(&heic, b"not-heic").expect("write");
+                let err = encode_image(&heic, IMAGE_HIGH, &out, true).expect_err("bad heic");
+                assert!(
+                    err.contains("unsupported") || err.contains("corrupt"),
+                    "{err}"
+                );
+            } else {
+                encode_image(&heic, IMAGE_HIGH, &out, true).expect("heic encode");
+                assert!(out.is_file());
+                assert!(fs::metadata(&out).unwrap().len() > 0);
+            }
+        } else {
+            fs::write(&heic, b"fake").expect("write");
+            let err = encode_image(&heic, IMAGE_HIGH, &out, true).expect_err("heic unsupported");
+            assert!(err.contains("unsupported"), "{err}");
+            assert!(
+                err.contains("macOS") || err.contains("HEIC") || err.contains("heic"),
+                "{err}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn balanced_and_small_shrink_photo_like_png_and_jpeg() {
         let dir = temp_dir("shrink-photo");
         let png = dir.join("scene.png");
@@ -333,12 +631,12 @@ mod tests {
     }
 
     #[test]
-    fn heic_fails_clearly() {
-        let dir = temp_dir("heic");
-        let heic = dir.join("shot.heic");
-        fs::write(&heic, b"fake").expect("write");
+    fn avif_fails_clearly() {
+        let dir = temp_dir("avif");
+        let avif = dir.join("shot.avif");
+        fs::write(&avif, b"fake").expect("write");
         let out = dir.join("out.jpg");
-        let err = encode_image(&heic, IMAGE_HIGH, &out, true).expect_err("heic unsupported");
+        let err = encode_image(&avif, IMAGE_HIGH, &out, true).expect_err("avif unsupported");
         assert!(err.contains("unsupported"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }

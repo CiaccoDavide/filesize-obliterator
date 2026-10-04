@@ -1,6 +1,6 @@
 //! Built-in compression preset registry (stable ids for UI + job runner).
 //!
-//! HEIC/HEIF is intentionally unsupported here — no offline decoder is bundled.
+//! HEIC/HEIF decode is platform-gated (macOS `sips`); see `format_support`.
 
 use super::types::MediaKind;
 use serde::{Deserialize, Serialize};
