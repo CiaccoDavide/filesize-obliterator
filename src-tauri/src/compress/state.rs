@@ -33,12 +33,19 @@ pub fn apply_transition(
             Ok((JobStatus::Cancelled, None))
         }
         (
-            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled,
+            JobStatus::Completed
+            | JobStatus::Failed
+            | JobStatus::Cancelled
+            | JobStatus::Skipped,
             Transition::Cancel,
         ) => Err(TransitionError::NotCancellable),
-        (JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled, _) => {
-            Err(TransitionError::AlreadyTerminal)
-        }
+        (
+            JobStatus::Completed
+            | JobStatus::Failed
+            | JobStatus::Cancelled
+            | JobStatus::Skipped,
+            _,
+        ) => Err(TransitionError::AlreadyTerminal),
         (_, Transition::Start) => Err(TransitionError::NotRunning),
         (_, Transition::Progress { .. } | Transition::Complete | Transition::Fail) => {
             Err(TransitionError::NotRunning)
@@ -122,6 +129,10 @@ mod tests {
         );
         assert_eq!(
             apply_transition(JobStatus::Cancelled, Transition::Cancel),
+            Err(TransitionError::NotCancellable)
+        );
+        assert_eq!(
+            apply_transition(JobStatus::Skipped, Transition::Cancel),
             Err(TransitionError::NotCancellable)
         );
     }

@@ -6,6 +6,13 @@ import {
   type OpsPhase,
   type ProgressRow,
 } from "../compress/progressState";
+import {
+  aggregateSessionStats,
+  formatSavePercent,
+  formatSignedBytes,
+} from "../compress/sessionStats";
+import type { RevealAction } from "../reveal/actions";
+import { RevealRowActions } from "./RevealRowActions";
 
 type Props = {
   rows: ProgressRow[];
@@ -18,12 +25,18 @@ type Props = {
   canRetryFailed: boolean;
   canDismissFailed: boolean;
   stagedCount: number;
+  estimating?: boolean;
   onStart: () => void;
+  onPreview?: () => void;
   onAbort: () => void;
   onCancelOne: (jobId: string) => void;
   onClearFinished: () => void;
   onRetryFailed: () => void;
   onDismissFailed: () => void;
+  onReveal?: (
+    action: RevealAction,
+    targets: { sourcePath: string; outputPath?: string },
+  ) => void;
 };
 
 function rowCancellable(row: ProgressRow): boolean {
@@ -32,7 +45,8 @@ function rowCancellable(row: ProgressRow): boolean {
 
 function phaseTone(phase: OpsPhase): "ok" | "warn" | "danger" {
   if (phase === "FAILED") return "danger";
-  if (phase === "PARTIAL" || phase === "ABORTING") return "warn";
+  if (phase === "PARTIAL" || phase === "ABORTING" || phase === "SKIPPED")
+    return "warn";
   return "ok";
 }
 
@@ -45,6 +59,11 @@ function rowDetail(row: ProgressRow): string {
     );
     const out = row.outputPath ?? "—";
     return delta ? `${out} · ${delta}` : out;
+  }
+  if (row.phase === "SKIPPED") {
+    const reason = row.error ?? "already compressed for this preset";
+    const out = row.outputPath ? ` · ${row.outputPath}` : "";
+    return `${reason}${out}`;
   }
   if (row.phase === "FAILED" && row.error) {
     return row.error;
@@ -67,17 +86,20 @@ export function CompressProgressPanel({
   canRetryFailed,
   canDismissFailed,
   stagedCount,
+  estimating = false,
   onStart,
+  onPreview,
   onAbort,
   onCancelOne,
   onClearFinished,
   onRetryFailed,
   onDismissFailed,
+  onReveal,
 }: Props) {
   const tone = phaseTone(phase);
-  const doneCount = rows.filter((r) => r.phase === "COMPLETE").length;
-  const failCount = rows.filter((r) => r.phase === "FAILED").length;
-  const hasFinished = doneCount + failCount > 0;
+  const stats = aggregateSessionStats(rows);
+  const hasFinished =
+    stats.filesDone + stats.filesFailed + stats.filesSkipped > 0;
 
   return (
     <section className="hud-frame compress-panel" aria-label="Compress progress">
@@ -101,20 +123,58 @@ export function CompressProgressPanel({
           ) : null}
         </div>
 
-        <div className="compress-meters">
+        <div
+          className="compress-meters"
+          aria-label="Session savings"
+          data-testid="session-meters"
+        >
           <div className="meter">
-            <span className="meter-label">Jobs</span>
-            <span className="meter-value">
-              {doneCount}/{rows.length || 0}
-            </span>
+            <span className="meter-label">Done</span>
+            <span className="meter-value mono">{stats.filesDone}</span>
           </div>
           <div className="meter">
             <span className="meter-label">Fail</span>
-            <span className="meter-value">{failCount}</span>
+            <span className="meter-value mono">{stats.filesFailed}</span>
+          </div>
+          <div className="meter">
+            <span className="meter-label">Skip</span>
+            <span className="meter-value mono">{stats.filesSkipped}</span>
+          </div>
+          <div className="meter">
+            <span className="meter-label">In</span>
+            <span className="meter-value mono">{formatBytes(stats.bytesIn)}</span>
+          </div>
+          <div className="meter">
+            <span className="meter-label">Out</span>
+            <span className="meter-value mono">{formatBytes(stats.bytesOut)}</span>
+          </div>
+          <div className="meter">
+            <span className="meter-label">Saved</span>
+            <span className="meter-value mono">
+              {formatSignedBytes(stats.bytesSaved)}
+            </span>
+          </div>
+          <div className="meter">
+            <span className="meter-label">Save</span>
+            <span className="meter-value mono">
+              {formatSavePercent(stats.savePercent)}
+            </span>
           </div>
         </div>
 
         <div className="compress-actions">
+          {onPreview ? (
+            <button
+              type="button"
+              className="btn"
+              disabled={
+                estimating || starting || stagedCount === 0 || canAbort
+              }
+              onClick={onPreview}
+            >
+              {estimating ? "ESTIMATING" : "PREVIEW"}
+            </button>
+          ) : null}
           <button
             type="button"
             className="btn primary"
@@ -195,16 +255,32 @@ export function CompressProgressPanel({
               <span className="compress-pct mono">
                 {Math.round(row.percent)}%
               </span>
-              {rowCancellable(row) ? (
-                <button
-                  type="button"
-                  className="btn danger compress-row-cancel"
-                  onClick={() => onCancelOne(row.jobId)}
-                  aria-label={`Cancel ${row.sourcePath}`}
-                >
-                  CANCEL
-                </button>
-              ) : null}
+              <div className="compress-row-side">
+                {onReveal ? (
+                  <RevealRowActions
+                    targets={{
+                      sourcePath: row.sourcePath,
+                      outputPath: row.outputPath,
+                    }}
+                    onReveal={(action) =>
+                      onReveal(action, {
+                        sourcePath: row.sourcePath,
+                        outputPath: row.outputPath,
+                      })
+                    }
+                  />
+                ) : null}
+                {rowCancellable(row) ? (
+                  <button
+                    type="button"
+                    className="btn danger compress-row-cancel"
+                    onClick={() => onCancelOne(row.jobId)}
+                    aria-label={`Cancel ${row.sourcePath}`}
+                  >
+                    CANCEL
+                  </button>
+                ) : null}
+              </div>
             </li>
           ))}
         </ul>

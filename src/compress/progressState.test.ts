@@ -46,6 +46,7 @@ describe("jobStatusToPhase", () => {
     expect(jobStatusToPhase("completed")).toBe("COMPLETE");
     expect(jobStatusToPhase("failed")).toBe("FAILED");
     expect(jobStatusToPhase("cancelled")).toBe("FAILED");
+    expect(jobStatusToPhase("skipped")).toBe("SKIPPED");
   });
 });
 
@@ -164,6 +165,54 @@ describe("applyCompressEvent", () => {
     });
     expect(rows[0].phase).toBe("ABORTING");
     expect(rows[0].percent).toBe(20);
+  });
+
+  it("ignores late progress on FAILED/COMPLETE/SKIPPED", () => {
+    for (const phase of ["FAILED", "COMPLETE", "SKIPPED"] as const) {
+      const rows = applyCompressEvent(
+        [
+          row({
+            phase,
+            percent: 100,
+            error: phase === "FAILED" ? "encoder crashed" : undefined,
+            outputPath: phase === "COMPLETE" ? "/tmp/out.webp" : undefined,
+          }),
+        ],
+        {
+          type: "progress",
+          jobId: "job-1",
+          percent: 55,
+          bytesProcessed: 1,
+          bytesTotal: 1000,
+        },
+      );
+      expect(rows[0].phase).toBe(phase);
+      expect(rows[0].percent).toBe(100);
+    }
+  });
+
+  it("does not let late complete overwrite FAILED or ABORTING", () => {
+    for (const phase of ["FAILED", "ABORTING"] as const) {
+      const before = row({
+        phase,
+        percent: 40,
+        error: phase === "FAILED" ? "encoder crashed" : undefined,
+        outputPath: undefined,
+      });
+      const rows = applyCompressEvent([before], {
+        type: "complete",
+        jobId: "job-1",
+        outputPath: "/tmp/should-not-win.webp",
+        originalBytes: 1000,
+        resultBytes: 100,
+        durationMs: 1,
+      });
+      expect(rows[0].phase).toBe(phase);
+      expect(rows[0].outputPath).toBeUndefined();
+      if (phase === "FAILED") {
+        expect(rows[0].error).toBe("encoder crashed");
+      }
+    }
   });
 
   it("records output path and size delta fields on complete", () => {
@@ -340,6 +389,16 @@ describe("markAborting + deriveOpsPhase", () => {
         row({ jobId: "job-2", phase: "FAILED", error: "encoder crashed" }),
       ]),
     ).toBe("PARTIAL");
+  });
+
+  it("derives SKIPPED when finished rows are only skips", () => {
+    expect(deriveOpsPhase([row({ phase: "SKIPPED" })])).toBe("SKIPPED");
+    expect(
+      deriveOpsPhase([
+        row({ phase: "SKIPPED" }),
+        row({ jobId: "job-2", phase: "COMPLETE" }),
+      ]),
+    ).toBe("COMPLETE");
   });
 
   it("derives AWAITING with no rows", () => {
@@ -536,18 +595,16 @@ describe("applyCancelResults", () => {
   });
 
   it("keeps COMPLETE when cancel rejects after the job already finished", () => {
-    const completed = applyCompressEvent(
-      [row({ phase: "ABORTING", percent: 90 })],
-      {
-        type: "complete",
-        jobId: "job-1",
+    const completed = [
+      row({
+        phase: "COMPLETE",
+        percent: 100,
         outputPath: "/tmp/a_compressed.stub",
         originalBytes: 1000,
         resultBytes: 120,
         durationMs: 40,
-      },
-    );
-    expect(completed[0].phase).toBe("COMPLETE");
+      }),
+    ];
 
     const next = applyCancelResults(completed, ["job-1"], [
       {
@@ -560,8 +617,8 @@ describe("applyCancelResults", () => {
       phase: "COMPLETE",
       outputPath: "/tmp/a_compressed.stub",
       resultBytes: 120,
-      error: undefined,
     });
+    expect(next[0].error).toBeUndefined();
     expect(deriveOpsPhase(next)).toBe("COMPLETE");
   });
 

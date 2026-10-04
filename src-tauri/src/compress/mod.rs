@@ -1,14 +1,17 @@
 mod audio_encode;
+mod estimate;
 mod format_support;
 mod image_encode;
 mod manager;
 mod output;
 mod pdf_encode;
 mod presets;
+mod skip;
 mod state;
 mod types;
 mod video_encode;
 
+pub use estimate::{CompressEstimateRequest, CompressEstimateResult};
 pub use format_support::{image_format_capabilities, FormatAvailability, FormatCapability};
 
 pub use manager::JobManager;
@@ -45,4 +48,12 @@ pub fn compress_list_presets(kind: Option<MediaKind>) -> Vec<PresetInfo> {
         Some(k) => presets_for_kind(&k),
         None => all_presets(),
     }
+}
+
+/// Dry-run size estimate for one source+preset. Offline; never writes `_compressed`.
+#[tauri::command]
+pub fn compress_estimate(
+    request: CompressEstimateRequest,
+) -> Result<CompressEstimateResult, String> {
+    estimate::estimate_request(request)
 }

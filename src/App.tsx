@@ -1,14 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { CompressProgressPanel } from "./components/CompressProgressPanel";
+import { EstimateSummaryStrip } from "./components/EstimateSummaryStrip";
 import { FileDropZone } from "./components/FileDropZone";
 import { IntakeStatus } from "./components/IntakeStatus";
 import { PresetPicker } from "./components/PresetPicker";
 import { StagedFileList } from "./components/StagedFileList";
+import { useCompressEstimate } from "./hooks/useCompressEstimate";
 import { useCompressProgress } from "./hooks/useCompressProgress";
 import { useFileIntake } from "./hooks/useFileIntake";
 import { usePresets } from "./hooks/usePresets";
 import type { MediaKind } from "./ipc/compress";
+import { revealInFileManager } from "./ipc/reveal";
+import type { RevealAction } from "./reveal/actions";
 import { kindsPresent } from "./presets/selection";
 import "./App.css";
 
@@ -28,7 +32,9 @@ function statusTone(status: string): "ok" | "warn" | "danger" {
   if (
     status.startsWith("PICK CANCELLED") ||
     status.startsWith("ALREADY") ||
-    status.startsWith("NO CHANGE")
+    status.startsWith("NO CHANGE") ||
+    status === "PATH MISSING" ||
+    status.startsWith("REVEAL FAILED")
   ) {
     return "warn";
   }
@@ -41,10 +47,13 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   /** Session privacy control — bound into compress_start as stripMetadata (default on). */
   const [stripMetadata, setStripMetadata] = useState(true);
+  /** When on, re-encode even if source+preset already has a `_compressed` output. */
+  const [forceReencode, setForceReencode] = useState(false);
   const presets = usePresets();
   const {
     staged,
     status,
+    setStatus,
     dragActive,
     pickFiles,
     clearStaged,
@@ -52,8 +61,19 @@ function App() {
     assignMissingPresets,
   } = useFileIntake(presets.presetByKind);
   const compress = useCompressProgress();
+  const estimate = useCompressEstimate();
 
   const presentKinds = useMemo(() => kindsPresent(staged), [staged]);
+
+  const estimateInputKey = useMemo(
+    () => staged.map((f) => `${f.path}\0${f.presetId}\0${f.bytes}`).join("\n"),
+    [staged],
+  );
+
+  // Drop stale PREVIEW numbers when staged files or their presets change.
+  useEffect(() => {
+    estimate.clearEstimates();
+  }, [estimateInputKey, estimate.clearEstimates]);
 
   useEffect(() => {
     if (!presets.loaded) return;
@@ -87,9 +107,26 @@ function App() {
   }, []);
 
   function handlePresetSelect(kind: MediaKind, presetId: string) {
+    // Clear before paint so summary/rows never briefly show the prior preset.
+    estimate.clearEstimates();
     presets.setKindPreset(kind, presetId);
     setKindPreset(kind, presetId);
   }
+
+  function handleClearStaged() {
+    clearStaged();
+  }
+
+  const handleReveal = useCallback(
+    async (
+      action: RevealAction,
+      targets: { sourcePath: string; outputPath?: string },
+    ) => {
+      const result = await revealInFileManager(action, targets);
+      setStatus(result.status);
+    },
+    [setStatus],
+  );
 
   return (
     <div className="app-shell">
@@ -110,14 +147,24 @@ function App() {
               <div className="staged-head">
                 <p className="panel-label">Staged</p>
                 {staged.length > 0 ? (
-                  <button type="button" className="btn" onClick={clearStaged}>
+                  <button type="button" className="btn" onClick={handleClearStaged}>
                     Clear
                   </button>
                 ) : null}
               </div>
-              <StagedFileList files={staged} />
+              <StagedFileList
+                files={staged}
+                estimatesByPath={estimate.byPath}
+                onReveal={(action, targets) => void handleReveal(action, targets)}
+              />
             </div>
           </FileDropZone>
+
+          <EstimateSummaryStrip
+            summary={estimate.summary}
+            estimating={estimate.estimating}
+            error={estimate.error}
+          />
 
           <PresetPicker
             kinds={presentKinds}
@@ -157,6 +204,28 @@ function App() {
             >
               compress_start.stripMetadata={String(stripMetadata)}
             </p>
+            <label className="hud-toggle">
+              <input
+                type="checkbox"
+                checked={forceReencode}
+                onChange={(e) => setForceReencode(e.target.checked)}
+              />
+              <span className="hud-toggle-label">Force</span>
+              <span className="mono hud-toggle-state">
+                {forceReencode ? "ON" : "OFF"}
+              </span>
+            </label>
+            <p className="hud-toggle-hint">
+              {forceReencode
+                ? "Re-encode even when this source+preset already has output."
+                : "Skip when an existing `_compressed` output matches source+preset."}
+            </p>
+            <p
+              className="hud-toggle-hint mono"
+              data-testid="force-payload"
+            >
+              compress_start.force={String(forceReencode)}
+            </p>
           </div>
 
           <CompressProgressPanel
@@ -170,14 +239,20 @@ function App() {
             canRetryFailed={compress.canRetryFailed}
             canDismissFailed={compress.canDismissFailed}
             stagedCount={staged.length}
+            estimating={estimate.estimating}
+            onPreview={() => void estimate.previewStaged(staged)}
             onStart={() =>
-              void compress.startStaged(staged, { stripMetadata })
+              void compress.startStaged(staged, {
+                stripMetadata,
+                force: forceReencode,
+              })
             }
             onAbort={() => void compress.abortAll()}
             onCancelOne={(jobId) => void compress.cancelOne(jobId)}
             onClearFinished={compress.clearFinished}
             onRetryFailed={() => void compress.retryFailed()}
             onDismissFailed={compress.dismissFailed}
+            onReveal={(action, targets) => void handleReveal(action, targets)}
           />
 
           <div className="hud-frame setup-surface">

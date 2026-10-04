@@ -150,6 +150,7 @@ export function useFileIntake(presetByKind: PresetByKind = {}) {
   return {
     staged,
     status,
+    setStatus,
     dragActive,
     pickFiles,
     clearStaged,

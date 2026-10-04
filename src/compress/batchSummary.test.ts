@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  abortingPastCleanupTimeout,
   buildBatchSummary,
+  CANCEL_CLEANUP_TIMEOUT_MS,
   dismissFailedRows,
   failedRowsForRetry,
   normalizeOpsError,
@@ -314,5 +316,37 @@ describe("stalledJobIds", () => {
         10 * 60_000,
       ),
     ).toEqual(["img", "aud", "pdf"]);
+  });
+});
+
+describe("abortingPastCleanupTimeout", () => {
+  it("returns ABORTING jobs past the cancel cleanup window", () => {
+    const now = 20_000;
+    const started = new Map<string, number>([
+      ["job-stuck", now - CANCEL_CLEANUP_TIMEOUT_MS],
+      ["job-fresh", now - 1_000],
+    ]);
+    expect(
+      abortingPastCleanupTimeout(
+        [
+          row({ jobId: "job-stuck", phase: "ABORTING" }),
+          row({ jobId: "job-fresh", phase: "ABORTING" }),
+          row({ jobId: "job-done", phase: "FAILED" }),
+        ],
+        started,
+        now,
+      ),
+    ).toEqual(["job-stuck"]);
+  });
+
+  it("ignores ABORTING rows without an abort-started timestamp", () => {
+    expect(
+      abortingPastCleanupTimeout(
+        [row({ phase: "ABORTING" })],
+        new Map(),
+        50_000,
+        1,
+      ),
+    ).toEqual([]);
   });
 });

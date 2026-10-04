@@ -8,7 +8,8 @@ export type OpsPhase =
   | "COMPLETE"
   | "FAILED"
   | "PARTIAL"
-  | "ABORTING";
+  | "ABORTING"
+  | "SKIPPED";
 
 /** Per-file row tracked from job IPC + event stream. */
 export type ProgressRow = {
@@ -34,6 +35,7 @@ const PHASE_RANK: Record<OpsPhase, number> = {
   COMPLETE: 3,
   FAILED: 3,
   PARTIAL: 3,
+  SKIPPED: 3,
 };
 
 export function jobStatusToPhase(status: JobStatus): OpsPhase {
@@ -48,6 +50,8 @@ export function jobStatusToPhase(status: JobStatus): OpsPhase {
       return "FAILED";
     case "cancelled":
       return "FAILED";
+    case "skipped":
+      return "SKIPPED";
     default: {
       const _exhaustive: never = status;
       return _exhaustive;
@@ -181,7 +185,7 @@ export function markFailed(
 }
 
 function isTerminalPhase(phase: OpsPhase): boolean {
-  return phase === "COMPLETE" || phase === "FAILED";
+  return phase === "COMPLETE" || phase === "FAILED" || phase === "SKIPPED";
 }
 
 function rejectMessage(reason: unknown): string {
@@ -270,6 +274,11 @@ export function applyCompressEvent(
 
   switch (event.type) {
     case "progress": {
+      // Abandoned encoders can still flush progress after Failed/Complete —
+      // never reopen a terminal row into COMPRESSING.
+      if (isTerminalPhase(row.phase)) {
+        return working;
+      }
       if (row.phase === "ABORTING") {
         copy[idx] = {
           ...row,
@@ -291,6 +300,15 @@ export function applyCompressEvent(
     case "log":
       return working;
     case "complete":
+      // Late complete must not overwrite FAILED/ABORTING (or clobber SKIPPED).
+      if (
+        row.phase === "FAILED" ||
+        row.phase === "ABORTING" ||
+        row.phase === "SKIPPED" ||
+        row.phase === "COMPLETE"
+      ) {
+        return working;
+      }
       copy[idx] = {
         ...row,
         phase: "COMPLETE",
@@ -335,6 +353,10 @@ export function deriveOpsPhase(rows: ProgressRow[]): OpsPhase {
   const hasOk = rows.some((r) => r.phase === "COMPLETE");
   if (hasFail && hasOk) return "PARTIAL";
   if (hasFail) return "FAILED";
+  if (rows.every((r) => r.phase === "SKIPPED")) return "SKIPPED";
+  if (rows.some((r) => r.phase === "SKIPPED") && !hasOk) {
+    return "SKIPPED";
+  }
   return "COMPLETE";
 }
 

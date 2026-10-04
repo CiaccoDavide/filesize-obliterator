@@ -5,6 +5,21 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "dialog:default"
+    "dialog:default",
+    "opener:allow-reveal-item-in-dir",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        { "path": "**/*" },
+        { "path": "$HOME/**" },
+        { "path": "$DESKTOP/**" },
+        { "path": "$DOCUMENT/**" },
+        { "path": "$DOWNLOAD/**" },
+        { "path": "$PICTURE/**" },
+        { "path": "$VIDEO/**" },
+        { "path": "$AUDIO/**" },
+        { "path": "/**" }
+      ]
+    }
   ]
 }

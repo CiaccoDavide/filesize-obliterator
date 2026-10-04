@@ -151,3 +151,26 @@ export const ENCODER_STALL_MS = 45_000;
  * encode gap between 20% and 90% ticks; still bounds hung COMPRESSING rows.
  */
 export const ENCODER_SPARSE_STALL_MS = 10 * 60_000;
+
+/**
+ * UI escape hatch after cancel: Rust force-fails within ~8s cancel grace.
+ * If the Failed event is dropped, force-fail ABORTING so RETRY is not gated forever.
+ */
+export const CANCEL_CLEANUP_TIMEOUT_MS = 15_000;
+
+/** ABORTING jobs whose cancel cleanup window elapsed without a terminal event. */
+export function abortingPastCleanupTimeout(
+  rows: ProgressRow[],
+  abortStartedMs: ReadonlyMap<string, number>,
+  nowMs: number,
+  timeoutMs: number = CANCEL_CLEANUP_TIMEOUT_MS,
+): string[] {
+  return rows
+    .filter((row) => {
+      if (row.phase !== "ABORTING") return false;
+      const started = abortStartedMs.get(row.jobId);
+      if (started === undefined) return false;
+      return nowMs - started >= timeoutMs;
+    })
+    .map((row) => row.jobId);
+}
