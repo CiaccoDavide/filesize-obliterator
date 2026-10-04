@@ -16,6 +16,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { StagedFileList } from "./components/StagedFileList";
 import { isBriefingOpen } from "./briefing/briefing";
 import type { ProgressRow } from "./compress/progressState";
+import { useCompletionNotification } from "./hooks/useCompletionNotification";
 import { useCompressEstimate } from "./hooks/useCompressEstimate";
 import { useCompressProgress } from "./hooks/useCompressProgress";
 import { useFileIntake } from "./hooks/useFileIntake";
@@ -90,6 +91,11 @@ function App() {
   } = useFileIntake(presets.presetByKind);
   const compress = useCompressProgress();
   const estimate = useCompressEstimate();
+  useCompletionNotification({
+    enabled: local.settings.notifyOnComplete,
+    summary: compress.batchSummary,
+    rows: compress.rows,
+  });
 
   const shellMode = useMemo(
     () =>
@@ -465,6 +471,7 @@ function App() {
                 onConcurrency={local.setConcurrency}
                 onStripMetadata={local.setStripMetadata}
                 onPreferHardware={local.setPreferHardware}
+                onNotifyOnComplete={local.setNotifyOnComplete}
                 onUiDensity={local.setUiDensity}
               />
             </div>

@@ -18,6 +18,7 @@ describe("defaultSettings", () => {
     expect(s.defaultPresets).toEqual({});
     expect(s.windowSize).toBeNull();
     expect(s.briefingSeen).toBe(false);
+    expect(s.notifyOnComplete).toBe(true);
   });
 });
 
@@ -32,6 +33,7 @@ describe("parseSettings", () => {
       defaultPresets: { image: "image-small", pdf: "pdf-screen" },
       windowSize: { width: 960, height: 720 },
       briefingSeen: true,
+      notifyOnComplete: false,
     });
     expect(parsed).toEqual({
       version: 1,
@@ -42,6 +44,7 @@ describe("parseSettings", () => {
       defaultPresets: { image: "image-small", pdf: "pdf-screen" },
       windowSize: { width: 960, height: 720 },
       briefingSeen: true,
+      notifyOnComplete: false,
     });
   });
 
@@ -51,6 +54,10 @@ describe("parseSettings", () => {
 
   it("defaults missing preferHardware to true (additive)", () => {
     expect(parseSettings({ version: 1 }).preferHardware).toBe(true);
+  });
+
+  it("defaults missing notifyOnComplete to true (additive)", () => {
+    expect(parseSettings({ version: 1 }).notifyOnComplete).toBe(true);
   });
 
   it("recovers to defaults for corrupt JSON text", () => {
