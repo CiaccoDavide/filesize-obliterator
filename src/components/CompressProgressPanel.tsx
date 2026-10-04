@@ -5,6 +5,10 @@ import {
   type OpsPhase,
   type ProgressRow,
 } from "../compress/progressState";
+import {
+  aggregateSessionStats,
+  formatSavePercent,
+} from "../compress/sessionStats";
 
 type Props = {
   rows: ProgressRow[];
@@ -63,9 +67,8 @@ export function CompressProgressPanel({
   onClearFinished,
 }: Props) {
   const tone = phaseTone(phase);
-  const doneCount = rows.filter((r) => r.phase === "COMPLETE").length;
-  const failCount = rows.filter((r) => r.phase === "FAILED").length;
-  const hasFinished = doneCount + failCount > 0;
+  const stats = aggregateSessionStats(rows);
+  const hasFinished = stats.filesDone + stats.filesFailed > 0;
 
   return (
     <section className="hud-frame compress-panel" aria-label="Compress progress">
@@ -84,16 +87,38 @@ export function CompressProgressPanel({
           ) : null}
         </div>
 
-        <div className="compress-meters">
+        <div
+          className="compress-meters"
+          aria-label="Session savings"
+          data-testid="session-meters"
+        >
           <div className="meter">
-            <span className="meter-label">Jobs</span>
-            <span className="meter-value">
-              {doneCount}/{rows.length || 0}
-            </span>
+            <span className="meter-label">Done</span>
+            <span className="meter-value mono">{stats.filesDone}</span>
           </div>
           <div className="meter">
             <span className="meter-label">Fail</span>
-            <span className="meter-value">{failCount}</span>
+            <span className="meter-value mono">{stats.filesFailed}</span>
+          </div>
+          <div className="meter">
+            <span className="meter-label">In</span>
+            <span className="meter-value mono">{formatBytes(stats.bytesIn)}</span>
+          </div>
+          <div className="meter">
+            <span className="meter-label">Out</span>
+            <span className="meter-value mono">{formatBytes(stats.bytesOut)}</span>
+          </div>
+          <div className="meter">
+            <span className="meter-label">Saved</span>
+            <span className="meter-value mono">
+              {formatBytes(Math.max(0, stats.bytesSaved))}
+            </span>
+          </div>
+          <div className="meter">
+            <span className="meter-label">Save</span>
+            <span className="meter-value mono">
+              {formatSavePercent(stats.savePercent)}
+            </span>
           </div>
         </div>
 
