@@ -81,4 +81,53 @@ describe("runSequentialAdmit", () => {
 
     expect(start).not.toHaveBeenCalled();
   });
+
+  it("cancels a job when abort races after the post-start current check", async () => {
+    const gate = createBatchAdmissionController();
+    const token = gate.begin();
+    const onLateAdmit = vi.fn();
+
+    await runSequentialAdmit(["a", "b"], {
+      isCurrent: () => gate.isCurrent(token),
+      start: async (file) => ({ id: `job-${file}` }),
+      onAdmitted: () => {
+        // Abort after the post-start isCurrent() passed but once the job is
+        // visible to the UI — the classic cancel-all TOCTOU window.
+        gate.abort();
+      },
+      onLateAdmit,
+    });
+
+    expect(onLateAdmit).toHaveBeenCalledWith({ id: "job-a" });
+  });
+
+  it("records per-file start failures and keeps admitting remaining files", async () => {
+    const gate = createBatchAdmissionController();
+    const token = gate.begin();
+    const admitted: string[] = [];
+    const startErrors: Array<{ file: string; message: string }> = [];
+
+    await runSequentialAdmit(["a", "b", "c"], {
+      isCurrent: () => gate.isCurrent(token),
+      start: async (file) => {
+        if (file === "b") throw new Error("start failed for b");
+        return { id: `job-${file}` };
+      },
+      onAdmitted: (job) => admitted.push(job.id),
+      onLateAdmit: () => {
+        throw new Error("should not late-admit");
+      },
+      onStartError: (file, err) => {
+        startErrors.push({
+          file,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      },
+    });
+
+    expect(startErrors).toEqual([
+      { file: "b", message: "start failed for b" },
+    ]);
+    expect(admitted).toEqual(["job-a", "job-c"]);
+  });
 });

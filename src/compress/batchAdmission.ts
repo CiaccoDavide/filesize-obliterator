@@ -23,6 +23,8 @@ export type SequentialAdmitHandlers<TFile, TJob> = {
   onAdmitted: (job: TJob) => void;
   /** Job returned from start after abort — caller should cancel it. */
   onLateAdmit: (job: TJob) => void | Promise<void>;
+  /** Per-file start failure — caller may record/surface; admission continues. */
+  onStartError?: (file: TFile, error: unknown) => void | Promise<void>;
 };
 
 /** Sequentially start jobs, checking the admission gate between files. */
@@ -32,11 +34,28 @@ export async function runSequentialAdmit<TFile, TJob>(
 ): Promise<void> {
   for (const file of files) {
     if (!handlers.isCurrent()) return;
-    const job = await handlers.start(file);
+
+    let job: TJob;
+    try {
+      job = await handlers.start(file);
+    } catch (err) {
+      await handlers.onStartError?.(file, err);
+      continue;
+    }
+
     if (!handlers.isCurrent()) {
       await handlers.onLateAdmit(job);
       return;
     }
+
     handlers.onAdmitted(job);
+
+    // Re-check after upsert: abortAll may have bumped the generation in the
+    // window between the post-start check and onAdmitted (often with empty
+    // rows), leaving a running job that was never cancelled.
+    if (!handlers.isCurrent()) {
+      await handlers.onLateAdmit(job);
+      return;
+    }
   }
 }

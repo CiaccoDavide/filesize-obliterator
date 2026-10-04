@@ -31,11 +31,17 @@ function cancelableActiveIds(rows: ProgressRow[]): string[] {
   });
 }
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export function useCompressProgress() {
   const [rows, setRows] = useState<ProgressRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const admissionRef = useRef(createBatchAdmissionController());
+  /** Jobs admitted by the current startStaged; abortAll always cancels these. */
+  const admittedIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -80,6 +86,7 @@ export function useCompressProgress() {
         return;
       }
       const token = admissionRef.current.begin();
+      admittedIdsRef.current = new Set();
       setStarting(true);
       setError(null);
       try {
@@ -93,6 +100,7 @@ export function useCompressProgress() {
               stripMetadata: options?.stripMetadata,
             }),
           onAdmitted: (job) => {
+            admittedIdsRef.current.add(job.id);
             setRows((prev) => upsertJob(prev, job));
           },
           onLateAdmit: (job) => {
@@ -100,9 +108,25 @@ export function useCompressProgress() {
               /* best-effort: batch already aborted */
             });
           },
+          onStartError: (file, err) => {
+            const message = errorMessage(err);
+            setError(message);
+            setRows((prev) => [
+              ...prev,
+              {
+                jobId: `admit-failed:${file.path}`,
+                sourcePath: file.path,
+                mediaKind: file.kind,
+                presetId: file.presetId ?? "",
+                phase: "FAILED",
+                percent: 0,
+                error: message,
+              },
+            ]);
+          },
         });
       } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(errorMessage(err));
       } finally {
         setStarting(false);
       }
@@ -114,13 +138,17 @@ export function useCompressProgress() {
     // Invalidate any in-flight startStaged so it stops admitting further files.
     admissionRef.current.abort();
 
-    // Read latest rows via functional update so jobs upserted since last render
-    // are included (stale closure over `rows` would miss them).
+    // Union of HUD rows + admission-tracked ids so a job upserted during abort
+    // (empty rows at setState time) is still cancelled.
     let ids: string[] = [];
     setRows((prev) => {
-      ids = cancelableActiveIds(prev);
+      const fromRows = cancelableActiveIds(prev);
+      ids = [...new Set([...fromRows, ...admittedIdsRef.current])];
       return ids.length === 0 ? prev : markAborting(prev, ids);
     });
+    for (const id of admittedIdsRef.current) {
+      if (!ids.includes(id)) ids.push(id);
+    }
     if (ids.length === 0) return;
 
     setError(null);
