@@ -30,6 +30,10 @@ tauri-plugin-notification = "2.5.1"
 # Video: local ffmpeg sidecar / PATH (resolved at runtime; see compress::video_encode).
 # PDF: local Ghostscript sidecar / PATH (resolved at runtime; see compress::pdf_encode).
 
+[target.'cfg(unix)'.dependencies]
+# Disk preflight: `statvfs` free-space query (offline).
+libc = "0.2"
+
 [profile.release]
 codegen-units = 1
 lto = true

@@ -15,6 +15,10 @@ import { PresetPicker } from "./components/PresetPicker";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { StagedFileList } from "./components/StagedFileList";
 import { isBriefingOpen } from "./briefing/briefing";
+import {
+  buildDiskPreflightItems,
+  formatDiskPreflightMessage,
+} from "./compress/diskPreflight";
 import type { ProgressRow } from "./compress/progressState";
 import { useCompletionNotification } from "./hooks/useCompletionNotification";
 import { useCompressEstimate } from "./hooks/useCompressEstimate";
@@ -23,7 +27,12 @@ import { useFileIntake } from "./hooks/useFileIntake";
 import { useLocalSettings } from "./hooks/useLocalSettings";
 import { usePresets } from "./hooks/usePresets";
 import { useWatchFolder } from "./hooks/useWatchFolder";
-import { compressHwEncodeStatus, type MediaKind } from "./ipc/compress";
+import {
+  compressDiskPreflight,
+  compressHwEncodeStatus,
+  type DiskPreflightResult,
+  type MediaKind,
+} from "./ipc/compress";
 import { revealInFileManager } from "./ipc/reveal";
 import { detectKind } from "./intake/kinds";
 import type { StagedFile } from "./intake/types";
@@ -48,7 +57,8 @@ function statusTone(status: string): "ok" | "warn" | "danger" {
     status.startsWith("INTAKE FAILED") ||
     status.startsWith("PICK FAILED") ||
     status.startsWith("WATCH FAILED") ||
-    status.startsWith("WATCH PICK FAILED")
+    status.startsWith("WATCH PICK FAILED") ||
+    (status.startsWith("DISK LOW") && !status.includes("override"))
   ) {
     return "danger";
   }
@@ -57,7 +67,9 @@ function statusTone(status: string): "ok" | "warn" | "danger" {
     status.startsWith("ALREADY") ||
     status.startsWith("NO CHANGE") ||
     status === "PATH MISSING" ||
-    status.startsWith("REVEAL FAILED")
+    status.startsWith("REVEAL FAILED") ||
+    status.startsWith("DISK LOW") ||
+    status.startsWith("DISK CHECK FAILED")
   ) {
     return "warn";
   }
@@ -73,6 +85,8 @@ function App() {
   );
   /** When on, re-encode even if source+preset already has a `_compressed` output. */
   const [forceReencode, setForceReencode] = useState(false);
+  /** Pending disk preflight gate (block or warn); warn allows COMPRESS ANYWAY. */
+  const [diskGate, setDiskGate] = useState<DiskPreflightResult | null>(null);
   const [hwStatus, setHwStatus] = useState<string | null>(null);
   const [keysOpen, setKeysOpen] = useState(false);
   /** Operator reopened BRIEFING after ACK (does not clear briefingSeen). */
@@ -120,11 +134,28 @@ function App() {
         presetId,
         status: "staged",
       };
-      void compress.enqueueWatchFiles([stagedFile], {
-        stripMetadata: local.settings.stripMetadata,
-        preferHardware: local.settings.preferHardware,
-        force: forceReencode,
-      });
+      void (async () => {
+        try {
+          const result = await compressDiskPreflight({
+            items: buildDiskPreflightItems([stagedFile]),
+          });
+          if (result.mode === "block") {
+            setStatus(formatDiskPreflightMessage(result));
+            return;
+          }
+          if (result.mode === "warn") {
+            // Watch has no override UI — surface and continue.
+            setStatus(formatDiskPreflightMessage(result));
+          }
+        } catch {
+          /* fail open for watch if free-space query fails */
+        }
+        void compress.enqueueWatchFiles([stagedFile], {
+          stripMetadata: local.settings.stripMetadata,
+          preferHardware: local.settings.preferHardware,
+          force: forceReencode,
+        });
+      })();
     },
     [
       compress,
@@ -170,18 +201,77 @@ function App() {
     focusTarget?.focus();
   }, []);
 
+  const estimateInputKey = useMemo(
+    () => staged.map((f) => `${f.path}\0${f.presetId}\0${f.bytes}`).join("\n"),
+    [staged],
+  );
+
+  // Drop stale PREVIEW numbers when staged files or their presets change.
+  useEffect(() => {
+    estimate.clearEstimates();
+  }, [estimateInputKey, estimate.clearEstimates]);
+
+  // Stale disk gate must not survive a staged/preset change.
+  useEffect(() => {
+    setDiskGate(null);
+  }, [estimateInputKey]);
+
+  const beginCompress = useCallback(
+    async (overrideWarn = false) => {
+      if (compress.canAbort || compress.starting || staged.length === 0) return;
+
+      const startOptions = {
+        stripMetadata: local.settings.stripMetadata,
+        preferHardware: local.settings.preferHardware,
+        force: forceReencode,
+      };
+
+      if (!overrideWarn) {
+        const items = buildDiskPreflightItems(staged, estimate.byPath);
+        if (items.length === 0) {
+          setDiskGate(null);
+          void compress.startStaged(staged, startOptions);
+          return;
+        }
+        try {
+          const result = await compressDiskPreflight({ items });
+          if (result.mode === "block" || result.mode === "warn") {
+            setDiskGate(result);
+            setStatus(formatDiskPreflightMessage(result));
+            return;
+          }
+        } catch (err: unknown) {
+          // Syscall failure: surface warn but do not hard-block the batch.
+          const detail = err instanceof Error ? err.message : String(err);
+          setStatus(`DISK CHECK FAILED — ${detail}`);
+        }
+      }
+
+      setDiskGate(null);
+      if (status.startsWith("DISK LOW") || status.startsWith("DISK CHECK FAILED")) {
+        setStatus("");
+      }
+      void compress.startStaged(staged, startOptions);
+    },
+    [
+      compress,
+      staged,
+      local.settings.stripMetadata,
+      local.settings.preferHardware,
+      forceReencode,
+      estimate.byPath,
+      setStatus,
+      status,
+    ],
+  );
+
   const shortcutHandlers = useMemo(
     () => ({
       pickFiles: () => {
         void pickFiles();
       },
       startCompress: () => {
-        if (compress.canAbort || compress.starting || staged.length === 0) return;
-        void compress.startStaged(staged, {
-          stripMetadata: local.settings.stripMetadata,
-          preferHardware: local.settings.preferHardware,
-          force: forceReencode,
-        });
+        void beginCompress(diskGate?.mode === "warn");
       },
       abortAll: () => {
         void compress.abortAll();
@@ -193,16 +283,7 @@ function App() {
       openSettings,
       toggleHelp: () => setKeysOpen((v) => !v),
     }),
-    [
-      pickFiles,
-      compress,
-      staged,
-      local.settings.stripMetadata,
-      local.settings.preferHardware,
-      forceReencode,
-      focusDropZone,
-      openSettings,
-    ],
+    [pickFiles, beginCompress, diskGate, compress, focusDropZone, openSettings],
   );
 
   const briefingOpen = isBriefingOpen({
@@ -226,16 +307,6 @@ function App() {
   });
 
   const presentKinds = useMemo(() => kindsPresent(staged), [staged]);
-
-  const estimateInputKey = useMemo(
-    () => staged.map((f) => `${f.path}\0${f.presetId}\0${f.bytes}`).join("\n"),
-    [staged],
-  );
-
-  // Drop stale PREVIEW numbers when staged files or their presets change.
-  useEffect(() => {
-    estimate.clearEstimates();
-  }, [estimateInputKey, estimate.clearEstimates]);
 
   useEffect(() => {
     if (!presets.loaded) return;
@@ -335,18 +406,27 @@ function App() {
           type="button"
           className="btn primary"
           disabled={startDisabled}
-          onClick={() =>
-            void compress.startStaged(staged, {
-              stripMetadata: local.settings.stripMetadata,
-              preferHardware: local.settings.preferHardware,
-              force: forceReencode,
-            })
+          onClick={() => void beginCompress(diskGate?.mode === "warn")}
+          aria-label={
+            diskGate?.mode === "warn" ? "Compress anyway despite disk warning" : "Start compress"
           }
-          aria-label="Start compress"
         >
-          {compress.starting ? "STARTING" : "COMPRESS"}
+          {compress.starting
+            ? "STARTING"
+            : diskGate?.mode === "warn"
+              ? "COMPRESS ANYWAY"
+              : "COMPRESS"}
         </button>
       </div>
+      {diskGate ? (
+        <p
+          className={`compress-status tone-${diskGate.mode === "block" ? "danger" : "warn"}`}
+          role="alert"
+          data-testid="disk-preflight"
+        >
+          {formatDiskPreflightMessage(diskGate)}
+        </p>
+      ) : null}
       {presets.error ? (
         <p className="compress-status tone-danger" role="alert">
           PRESETS FAILED — {presets.error}
