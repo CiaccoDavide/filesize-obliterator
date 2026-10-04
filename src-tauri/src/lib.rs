@@ -5,8 +5,8 @@ mod settings;
 mod watch;
 
 use compress::{
-    compress_cancel, compress_estimate, compress_hw_encode_status, compress_list,
-    compress_list_presets, compress_start, JobManager,
+    compress_cancel, compress_disk_preflight, compress_estimate, compress_hw_encode_status,
+    compress_list, compress_list_presets, compress_start, JobManager,
 };
 use intake::intake_resolve;
 use preview::{preview_allow_assets, preview_revoke_assets, PreviewGrantState};
@@ -51,6 +51,7 @@ pub fn run() {
             compress_list,
             compress_list_presets,
             compress_estimate,
+            compress_disk_preflight,
             compress_hw_encode_status,
             intake_resolve,
             preview_allow_assets,

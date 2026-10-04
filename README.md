@@ -82,6 +82,20 @@ Re-running the same **source path + preset** skips by default when a prior succe
 
 Turn on HUD **Force** (`compress_start.force=true`) to re-encode anyway; the new file follows the usual collision policy (`Photo.webp`, then `Photo_2.webp`, …). Detection is local only — no cloud dedupe.
 
+### Disk space preflight
+
+Before a batch starts, the app estimates write need and compares it to free space on each output volume (offline `statvfs` / `GetDiskFreeSpaceExW` only — one syscall per volume, so small image batches stay snappy).
+
+| Constant | Value | Role |
+|----------|-------|------|
+| Headroom | 64 MiB per volume | Slack for temp files / FS overhead |
+| Missing-estimate multiplier | 1.1 × source size | Used when PREVIEW estimate is absent |
+| Warn ratio | 1.25 × needed | Tight free space → warn; **COMPRESS ANYWAY** overrides |
+
+- **Block** when `freeBytes < neededBytes` → `DISK LOW — free … / need …` (start refused)
+- **Warn** when `freeBytes < neededBytes × 1.25` → same status with override allowed
+- `neededBytes` = sum of `compress_estimate` (or 1.1× source) + headroom, per volume
+
 ### Metadata (`stripMetadata`)
 
 Job option `stripMetadata` (default **true**, HUD: **Strip metadata**):

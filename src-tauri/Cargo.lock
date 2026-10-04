@@ -1038,6 +1038,7 @@ name = "filesize-obliterator"
 version = "0.1.0"
 dependencies = [
  "image",
+ "libc",
  "mp3lame-encoder",
  "serde",
  "serde_json",
