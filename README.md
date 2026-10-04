@@ -38,9 +38,12 @@ npm run build
 
 ```bash
 npm run typecheck
+npm test
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
+
+Folder drops expand one level of immediate files (nested directories are ignored).
 
 ## Layout
 
