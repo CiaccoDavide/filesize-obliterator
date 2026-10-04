@@ -101,8 +101,11 @@ function App() {
   );
 
   const focusDropZone = useCallback(() => {
-    dropZoneRef.current?.focus();
-    dropZoneRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    const zone = dropZoneRef.current;
+    zone?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    zone
+      ?.querySelector<HTMLButtonElement>("[data-drop-browse]")
+      ?.focus();
   }, []);
 
   const openSettings = useCallback(() => {
@@ -255,34 +258,57 @@ function App() {
 
   const showOps = shellShowsOps(shellMode);
   const showProgress = shellShowsProgress(shellMode);
-  const progressFirst = showProgress;
 
   const startDisabled =
     compress.starting || staged.length === 0 || compress.canAbort;
 
-  const progressPanel = showProgress ? (
-    <CompressProgressPanel
-      rows={compress.rows}
-      phase={compress.phase}
-      batchSummary={compress.batchSummary}
-      error={compress.error}
-      canAbort={compress.canAbort}
-      aborting={compress.aborting}
-      canRetryFailed={compress.canRetryFailed}
-      canDismissFailed={compress.canDismissFailed}
-      onAbort={() => void compress.abortAll()}
-      onCancelOne={(jobId) => void compress.cancelOne(jobId)}
-      onClearFinished={compress.clearFinished}
-      onRetryFailed={() => void compress.retryFailed()}
-      onDismissFailed={compress.dismissFailed}
-      onPreviewImage={handlePreviewImage}
-      onReveal={(action, targets) => void handleReveal(action, targets)}
-    />
-  ) : null;
-
-  const opsStrip = showOps ? (
+  /*
+   * DOM order for keyboard: drop (Browse) → presets → start → queue, then
+   * secondary ops (toggles/preview) and staged reveals. CSS grid keeps the
+   * visual intake/ops composition.
+   */
+  const opsPrimary = showOps ? (
     <div className="ops-strip hud-frame" data-testid="ops-strip">
       <p className="panel-label">Ops</p>
+      <PresetPicker
+        kinds={presentKinds}
+        byKind={presets.byKind}
+        selected={presets.presetByKind}
+        onSelect={handlePresetSelect}
+        disabled={!presets.loaded}
+      />
+      <div className="ops-start" data-testid="ops-start">
+        <button
+          type="button"
+          className="btn primary"
+          disabled={startDisabled}
+          onClick={() =>
+            void compress.startStaged(staged, {
+              stripMetadata: local.settings.stripMetadata,
+              preferHardware: local.settings.preferHardware,
+              force: forceReencode,
+            })
+          }
+          aria-label="Start compress"
+        >
+          {compress.starting ? "STARTING" : "COMPRESS"}
+        </button>
+      </div>
+      {presets.error ? (
+        <p className="compress-status tone-danger" role="alert">
+          PRESETS FAILED — {presets.error}
+        </p>
+      ) : null}
+      {local.status ? (
+        <p className="compress-status tone-danger" role="alert">
+          {local.status}
+        </p>
+      ) : null}
+    </div>
+  ) : null;
+
+  const opsSecondary = showOps ? (
+    <div className="ops-secondary hud-frame" data-testid="ops-secondary">
       <div className="ops-toggles">
         <label className="hud-toggle">
           <input
@@ -311,61 +337,47 @@ function App() {
       <p className="hud-toggle-hint">
         Privacy strips EXIF/GPS. Force re-encodes even when output exists.
       </p>
-
       <EstimateSummaryStrip
         summary={estimate.summary}
         estimating={estimate.estimating}
         error={estimate.error}
       />
-
-      <PresetPicker
-        kinds={presentKinds}
-        byKind={presets.byKind}
-        selected={presets.presetByKind}
-        onSelect={handlePresetSelect}
-        disabled={!presets.loaded}
-      />
-
-      <div className="ops-start" data-testid="ops-start">
+      <div className="ops-start">
         <button
           type="button"
           className="btn"
-          disabled={
-            estimate.estimating || startDisabled
-          }
+          disabled={estimate.estimating || startDisabled}
           onClick={() => void estimate.previewStaged(staged)}
+          aria-label="Preview dry-run estimate"
         >
           {estimate.estimating ? "ESTIMATING" : "PREVIEW"}
         </button>
-        <button
-          type="button"
-          className="btn primary"
-          disabled={startDisabled}
-          onClick={() =>
-            void compress.startStaged(staged, {
-              stripMetadata: local.settings.stripMetadata,
-              preferHardware: local.settings.preferHardware,
-              force: forceReencode,
-            })
-          }
-        >
-          {compress.starting ? "STARTING" : "COMPRESS"}
-        </button>
       </div>
-
-      {presets.error ? (
-        <p className="compress-status tone-danger" role="alert">
-          PRESETS FAILED — {presets.error}
-        </p>
-      ) : null}
-
-      {local.status ? (
-        <p className="compress-status tone-danger" role="alert">
-          {local.status}
-        </p>
-      ) : null}
     </div>
   ) : null;
+
+  const stagedPanel = (
+    <div className="staged-panel hud-frame" data-testid="staged-panel">
+      <div className="staged-head">
+        <p className="panel-label">Staged</p>
+        {staged.length > 0 ? (
+          <button
+            type="button"
+            className="btn"
+            onClick={handleClearStaged}
+            aria-label="Clear staged files"
+          >
+            Clear
+          </button>
+        ) : null}
+      </div>
+      <StagedFileList
+        files={staged}
+        estimatesByPath={estimate.byPath}
+        onReveal={(action, targets) => void handleReveal(action, targets)}
+      />
+    </div>
+  );
 
   return (
     <div className={`app-shell ${densityClass} mode-${shellMode}`}>
@@ -404,33 +416,38 @@ function App() {
             </p>
           </header>
 
-          {progressFirst ? progressPanel : null}
-
           <FileDropZone
             ref={dropZoneRef}
             dragActive={dragActive}
             onPick={() => void pickFiles()}
           >
             <IntakeStatus status={status} tone={statusTone(status)} />
-            <div className="staged-panel">
-              <div className="staged-head">
-                <p className="panel-label">Staged</p>
-                {staged.length > 0 ? (
-                  <button type="button" className="btn" onClick={handleClearStaged}>
-                    Clear
-                  </button>
-                ) : null}
-              </div>
-              <StagedFileList
-                files={staged}
-                estimatesByPath={estimate.byPath}
-                onReveal={(action, targets) => void handleReveal(action, targets)}
-              />
-            </div>
           </FileDropZone>
 
-          {opsStrip}
-          {!progressFirst ? progressPanel : null}
+          {opsPrimary}
+
+          {showProgress ? (
+            <CompressProgressPanel
+              rows={compress.rows}
+              phase={compress.phase}
+              batchSummary={compress.batchSummary}
+              error={compress.error}
+              canAbort={compress.canAbort}
+              aborting={compress.aborting}
+              canRetryFailed={compress.canRetryFailed}
+              canDismissFailed={compress.canDismissFailed}
+              onAbort={() => void compress.abortAll()}
+              onCancelOne={(jobId) => void compress.cancelOne(jobId)}
+              onClearFinished={compress.clearFinished}
+              onRetryFailed={() => void compress.retryFailed()}
+              onDismissFailed={compress.dismissFailed}
+              onPreviewImage={handlePreviewImage}
+              onReveal={(action, targets) => void handleReveal(action, targets)}
+            />
+          ) : null}
+
+          {opsSecondary}
+          {stagedPanel}
 
           <details ref={settingsRef} className="hud-frame secondary-panel">
             <summary className="secondary-summary">
