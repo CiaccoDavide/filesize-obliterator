@@ -10,6 +10,8 @@ import {
   formatSavePercent,
   formatSignedBytes,
 } from "../compress/sessionStats";
+import type { RevealAction } from "../reveal/actions";
+import { RevealRowActions } from "./RevealRowActions";
 
 type Props = {
   rows: ProgressRow[];
@@ -23,6 +25,10 @@ type Props = {
   onAbort: () => void;
   onCancelOne: (jobId: string) => void;
   onClearFinished: () => void;
+  onReveal?: (
+    action: RevealAction,
+    targets: { sourcePath: string; outputPath?: string },
+  ) => void;
 };
 
 function rowCancellable(row: ProgressRow): boolean {
@@ -66,6 +72,7 @@ export function CompressProgressPanel({
   onAbort,
   onCancelOne,
   onClearFinished,
+  onReveal,
 }: Props) {
   const tone = phaseTone(phase);
   const stats = aggregateSessionStats(rows);
@@ -183,16 +190,32 @@ export function CompressProgressPanel({
               <span className="compress-pct mono">
                 {Math.round(row.percent)}%
               </span>
-              {rowCancellable(row) ? (
-                <button
-                  type="button"
-                  className="btn danger compress-row-cancel"
-                  onClick={() => onCancelOne(row.jobId)}
-                  aria-label={`Cancel ${row.sourcePath}`}
-                >
-                  CANCEL
-                </button>
-              ) : null}
+              <div className="compress-row-side">
+                {onReveal ? (
+                  <RevealRowActions
+                    targets={{
+                      sourcePath: row.sourcePath,
+                      outputPath: row.outputPath,
+                    }}
+                    onReveal={(action) =>
+                      onReveal(action, {
+                        sourcePath: row.sourcePath,
+                        outputPath: row.outputPath,
+                      })
+                    }
+                  />
+                ) : null}
+                {rowCancellable(row) ? (
+                  <button
+                    type="button"
+                    className="btn danger compress-row-cancel"
+                    onClick={() => onCancelOne(row.jobId)}
+                    aria-label={`Cancel ${row.sourcePath}`}
+                  >
+                    CANCEL
+                  </button>
+                ) : null}
+              </div>
             </li>
           ))}
         </ul>

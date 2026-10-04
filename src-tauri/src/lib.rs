@@ -31,6 +31,7 @@ fn app_info() -> AppInfo {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(JobManager::default())
         .invoke_handler(tauri::generate_handler![
             ping,

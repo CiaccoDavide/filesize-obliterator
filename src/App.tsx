@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { CompressProgressPanel } from "./components/CompressProgressPanel";
 import { FileDropZone } from "./components/FileDropZone";
@@ -9,6 +9,8 @@ import { useCompressProgress } from "./hooks/useCompressProgress";
 import { useFileIntake } from "./hooks/useFileIntake";
 import { usePresets } from "./hooks/usePresets";
 import type { MediaKind } from "./ipc/compress";
+import { revealInFileManager } from "./ipc/reveal";
+import type { RevealAction } from "./reveal/actions";
 import { kindsPresent } from "./presets/selection";
 import "./App.css";
 
@@ -28,7 +30,9 @@ function statusTone(status: string): "ok" | "warn" | "danger" {
   if (
     status.startsWith("PICK CANCELLED") ||
     status.startsWith("ALREADY") ||
-    status.startsWith("NO CHANGE")
+    status.startsWith("NO CHANGE") ||
+    status === "PATH MISSING" ||
+    status.startsWith("REVEAL FAILED")
   ) {
     return "warn";
   }
@@ -45,6 +49,7 @@ function App() {
   const {
     staged,
     status,
+    setStatus,
     dragActive,
     pickFiles,
     clearStaged,
@@ -91,6 +96,17 @@ function App() {
     setKindPreset(kind, presetId);
   }
 
+  const handleReveal = useCallback(
+    async (
+      action: RevealAction,
+      targets: { sourcePath: string; outputPath?: string },
+    ) => {
+      const result = await revealInFileManager(action, targets);
+      setStatus(result.status);
+    },
+    [setStatus],
+  );
+
   return (
     <div className="app-shell">
       <div className="grid-bg" aria-hidden="true" />
@@ -115,7 +131,10 @@ function App() {
                   </button>
                 ) : null}
               </div>
-              <StagedFileList files={staged} />
+              <StagedFileList
+                files={staged}
+                onReveal={(action, targets) => void handleReveal(action, targets)}
+              />
             </div>
           </FileDropZone>
 
@@ -173,6 +192,7 @@ function App() {
             onAbort={() => void compress.abortAll()}
             onCancelOne={(jobId) => void compress.cancelOne(jobId)}
             onClearFinished={compress.clearFinished}
+            onReveal={(action, targets) => void handleReveal(action, targets)}
           />
 
           <div className="hud-frame setup-surface">
