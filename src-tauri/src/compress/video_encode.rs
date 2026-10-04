@@ -8,6 +8,8 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
 use super::presets::{video_preset, VideoEncodeTarget, VideoPreset};
 
 /// Containers this build documents as supported for offline video compress.
@@ -281,35 +283,61 @@ pub fn encode_video(
         })
     });
 
-    let reader = BufReader::new(stdout);
-    let mut last_reported = -1.0_f64;
-    for line in reader.lines().map_while(Result::ok) {
-        if cancelled(cancel) {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = std::fs::remove_file(dest);
-            return Err("cancelled".into());
+    // Progress lines arrive on a reader thread so the encode loop can poll `cancel`
+    // even when ffmpeg goes silent (no out_time lines) — otherwise cancel never kills
+    // the child and the UI stays ABORTING forever.
+    let (line_tx, line_rx) = mpsc::channel::<String>();
+    let reader_handle = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            if line_tx.send(line).is_err() {
+                break;
+            }
         }
+    });
 
-        if let Some(out_secs) = parse_out_time_secs(&line) {
-            let percent = match duration.filter(|d| *d > 0.05) {
-                Some(d) => ((out_secs / d) * 100.0).clamp(0.0, 99.0),
-                None => 50.0, // unknown duration: keep a mid-encode signal
-            };
-            // Throttle: at least 1% steps so long encodes still move the meter.
-            if percent - last_reported >= 1.0 || last_reported < 0.0 {
-                last_reported = percent;
-                if let Some(cb) = on_progress.as_mut() {
-                    if !cb(percent) {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        let _ = std::fs::remove_file(dest);
-                        return Err("cancelled".into());
+    let mut last_reported = -1.0_f64;
+    let cancelled_mid = loop {
+        match line_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(line) => {
+                if cancelled(cancel) {
+                    break true;
+                }
+
+                if let Some(out_secs) = parse_out_time_secs(&line) {
+                    let percent = match duration.filter(|d| *d > 0.05) {
+                        Some(d) => ((out_secs / d) * 100.0).clamp(0.0, 99.0),
+                        None => 50.0, // unknown duration: keep a mid-encode signal
+                    };
+                    // Throttle: at least 1% steps so long encodes still move the meter.
+                    if percent - last_reported >= 1.0 || last_reported < 0.0 {
+                        last_reported = percent;
+                        if let Some(cb) = on_progress.as_mut() {
+                            if !cb(percent) {
+                                break true;
+                            }
+                        }
                     }
                 }
             }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if cancelled(cancel) {
+                    break true;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break false,
         }
+    };
+
+    if cancelled_mid {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(dest);
+        // Drop the sender side via reader exit after kill closes the pipe.
+        let _ = reader_handle.join();
+        return Err("cancelled".into());
     }
+    let _ = reader_handle.join();
 
     let status = child
         .wait()
@@ -345,7 +373,9 @@ mod tests {
     use crate::compress::presets::{VIDEO_BALANCED, VIDEO_HIGH, VIDEO_SMALL};
     use crate::compress::output::prepare_output_path;
     use std::fs;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -672,6 +702,37 @@ mod tests {
         let err =
             encode_video(&src, VIDEO_BALANCED, &out, Some(&cancel), None, true).expect_err("cancelled");
         assert_eq!(err, "cancelled");
+        assert!(!out.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancel_flag_polled_without_progress_callback_kills_encode() {
+        let Some(_) = require_ffmpeg() else {
+            return;
+        };
+        let dir = temp_dir("cancel-poll");
+        let src = dir.join("long.mp4");
+        write_progress_fixture_mp4(&src);
+        let out = dir.join("out.mp4");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_w = Arc::clone(&cancel);
+        // Flip cancel from another thread — encode must observe it even with no
+        // on_progress callback (poll path, not progress-line-only).
+        let watcher = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            cancel_w.store(true, Ordering::SeqCst);
+        });
+        let err = encode_video(
+            &src,
+            VIDEO_HIGH,
+            &out,
+            Some(cancel.as_ref()),
+            None,
+            true,
+        );
+        let _ = watcher.join();
+        assert_eq!(err.expect_err("expected cancel"), "cancelled");
         assert!(!out.exists());
         let _ = fs::remove_dir_all(&dir);
     }

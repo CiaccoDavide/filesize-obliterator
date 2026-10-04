@@ -113,10 +113,12 @@ export function dismissFailedRows(rows: ProgressRow[]): ProgressRow[] {
 }
 
 /**
- * COMPRESSING video jobs silent longer than `stallMs`.
+ * COMPRESSING jobs silent longer than their kind's stall window.
  *
- * Only video emits dense progress during encode; image/audio/pdf tick sparsely
- * (e.g. 0 → 20 → 90), so silence there is not a stall signal.
+ * Video emits dense progress; `stallMs` (default 45s) applies.
+ * Image/audio/pdf tick sparsely (0 → 20 → 90), so they use a much longer
+ * `sparseStallMs` — long enough not to false-fail normal encodes, short enough
+ * that a hung encoder cannot stay COMPRESSING forever.
  * Callers must compressCancel these ids (mark ABORTING first) — never flip
  * straight to FAILED while the backend may still hold reserved paths/.partial.
  */
@@ -125,14 +127,18 @@ export function stalledJobIds(
   lastActivityMs: ReadonlyMap<string, number>,
   nowMs: number,
   stallMs: number,
+  sparseStallMs: number = ENCODER_SPARSE_STALL_MS,
 ): string[] {
   return rows
     .filter((row) => {
       if (row.phase !== "COMPRESSING") return false;
-      if (row.mediaKind !== "video") return false;
       const last = lastActivityMs.get(row.jobId);
       if (last === undefined) return false;
-      return nowMs - last >= stallMs;
+      const silentFor = nowMs - last;
+      if (row.mediaKind === "video") {
+        return silentFor >= stallMs;
+      }
+      return silentFor >= sparseStallMs;
     })
     .map((row) => row.jobId);
 }
@@ -140,3 +146,8 @@ export function stalledJobIds(
 export const ENCODER_STALL_ERROR = STALL_ERROR;
 /** Default stall window when video progress events stop arriving. */
 export const ENCODER_STALL_MS = 45_000;
+/**
+ * Stall window for image/audio/pdf (sparse progress). Far longer than a normal
+ * encode gap between 20% and 90% ticks; still bounds hung COMPRESSING rows.
+ */
+export const ENCODER_SPARSE_STALL_MS = 10 * 60_000;

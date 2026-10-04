@@ -3,9 +3,10 @@ use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter};
 
@@ -22,6 +23,64 @@ use super::video_encode::encode_video;
 
 /// Hard cap on parallel encode workers (video/ffmpeg-heavy workloads).
 pub const MAX_CONCURRENT_JOBS: usize = 2;
+
+/// After cancel, wait this long for cooperative encoder exit before force-failing.
+const CANCEL_FORCE_FAIL_GRACE: Duration = Duration::from_secs(8);
+/// Wall clock for image/audio/pdf — bounds hung encodes that emit no progress.
+const NON_VIDEO_ENCODE_WALL: Duration = Duration::from_secs(15 * 60);
+
+/// Run `encode` on a worker thread; return cancelled/stalled if it ignores cancel
+/// or exceeds `wall` (so the UI cannot stay COMPRESSING / ABORTING forever).
+fn supervised_encode<F>(cancel: &AtomicBool, wall: Duration, encode: F) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    supervised_encode_with(cancel, wall, CANCEL_FORCE_FAIL_GRACE, encode)
+}
+
+fn supervised_encode_with<F>(
+    cancel: &AtomicBool,
+    wall: Duration,
+    cancel_grace: Duration,
+    encode: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = match catch_unwind(AssertUnwindSafe(encode)) {
+            Ok(inner) => inner,
+            Err(_) => Err("encoder crashed".into()),
+        };
+        let _ = tx.send(result);
+    });
+    let started = Instant::now();
+    let mut cancel_since: Option<Instant> = None;
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if cancel.load(Ordering::SeqCst) {
+                    let since = cancel_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= cancel_grace {
+                        return Err("cancelled".into());
+                    }
+                }
+                if started.elapsed() >= wall {
+                    cancel.store(true, Ordering::SeqCst);
+                    match rx.recv_timeout(cancel_grace) {
+                        Ok(result) => return result,
+                        Err(_) => return Err("encoder stalled — no progress".into()),
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("encoder crashed".into());
+            }
+        }
+    }
+}
 
 struct JobRecord {
     info: JobInfo,
@@ -409,6 +468,7 @@ fn fail_job(manager: &JobManager, app: &AppHandle, job_id: String, error: String
     );
 }
 
+#[cfg(test)]
 fn job_is_active(manager: &JobManager, job_id: &str) -> bool {
     manager
         .with_job(job_id, |record| {
@@ -420,9 +480,23 @@ fn job_is_active(manager: &JobManager, job_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Fail only when the job is still queued/running (panic / stall recovery).
+/// True when a terminal Failed event is still required for the UI (active work, or
+/// Cancelled after IPC cancel where the worker must still surface cleanup).
+fn job_needs_failed_event(manager: &JobManager, job_id: &str) -> bool {
+    manager
+        .with_job(job_id, |record| {
+            Ok(matches!(
+                record.info.status,
+                JobStatus::Queued | JobStatus::Running | JobStatus::Cancelled
+            ))
+        })
+        .unwrap_or(false)
+}
+
+/// Fail when the job still needs a terminal Failed event (panic / stall recovery).
+/// Includes Cancelled so panic-after-cancel cannot leave the UI stuck in ABORTING.
 fn fail_job_if_active(manager: &JobManager, app: &AppHandle, job_id: String, error: String) {
-    if job_is_active(manager, &job_id) {
+    if job_needs_failed_event(manager, &job_id) {
         fail_job(manager, app, job_id, error);
     }
 }
@@ -615,12 +689,19 @@ fn run_job(
     }
 
     // catch_unwind: encoder/process panic must not leave the job stuck in Running.
+    // supervised_encode: hung image/audio/pdf (or silent ffmpeg) cannot block forever —
+    // cancel grace / wall timeout force a terminal error so Failed always reaches the UI.
     let encode_result = catch_unwind(AssertUnwindSafe(|| match media_kind {
         MediaKind::Image => {
             if !report_progress(20.0) {
                 return Err("cancelled".to_string());
             }
-            let result = encode_image(&source, &preset_id, &partial_path, strip_metadata);
+            let source = source.clone();
+            let preset_id = preset_id.clone();
+            let partial_path = partial_path.clone();
+            let result = supervised_encode(cancel.as_ref(), NON_VIDEO_ENCODE_WALL, move || {
+                encode_image(&source, &preset_id, &partial_path, strip_metadata)
+            });
             if result.is_ok() && !report_progress(90.0) {
                 return Err("cancelled".to_string());
             }
@@ -630,7 +711,18 @@ fn run_job(
             if !report_progress(20.0) {
                 return Err("cancelled".to_string());
             }
-            let result = encode_audio(&source, &preset_id, &partial_path, Some(cancel.as_ref()));
+            let source = source.clone();
+            let preset_id = preset_id.clone();
+            let partial_path = partial_path.clone();
+            let cancel_flag = Arc::clone(&cancel);
+            let result = supervised_encode(cancel.as_ref(), NON_VIDEO_ENCODE_WALL, move || {
+                encode_audio(
+                    &source,
+                    &preset_id,
+                    &partial_path,
+                    Some(cancel_flag.as_ref()),
+                )
+            });
             if result.is_ok() && !report_progress(90.0) {
                 return Err("cancelled".to_string());
             }
@@ -640,19 +732,54 @@ fn run_job(
             if !report_progress(1.0) {
                 return Err("cancelled".to_string());
             }
-            let mut on_progress = |percent: f64| -> bool {
-                // Map encoder 0..=99 into job 1..=95 so finalize can still emit 100.
-                let mapped = (percent.clamp(0.0, 99.0) * 0.95).clamp(1.0, 95.0);
-                report_progress(mapped)
-            };
-            let result = encode_video(
-                &source,
-                &preset_id,
-                &partial_path,
-                Some(cancel.as_ref()),
-                Some(&mut on_progress),
-                strip_metadata,
-            );
+            let source = source.clone();
+            let preset_id = preset_id.clone();
+            let partial_path = partial_path.clone();
+            let cancel_flag = Arc::clone(&cancel);
+            let manager_progress = manager.clone();
+            let app_progress = app.clone();
+            let job_id_progress = job_id.clone();
+            // Long wall: video uses dense progress + cancel-kill; this is a last-resort bound.
+            let video_wall = Duration::from_secs(6 * 60 * 60);
+            let result = supervised_encode(cancel.as_ref(), video_wall, move || {
+                let report = |percent: f64| -> bool {
+                    if cancel_flag.load(Ordering::SeqCst)
+                        || manager_progress.is_cancel_requested(&job_id_progress)
+                    {
+                        return false;
+                    }
+                    if !manager_progress
+                        .mark_progress(&job_id_progress, percent)
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                    let bytes_processed = ((percent / 100.0) * original_bytes as f64) as u64;
+                    emit(
+                        &app_progress,
+                        CompressEvent::Progress {
+                            job_id: job_id_progress.clone(),
+                            percent,
+                            bytes_processed: Some(bytes_processed),
+                            bytes_total: Some(original_bytes),
+                        },
+                    );
+                    true
+                };
+                let mut on_progress = |percent: f64| -> bool {
+                    // Map encoder 0..=99 into job 1..=95 so finalize can still emit 100.
+                    let mapped = (percent.clamp(0.0, 99.0) * 0.95).clamp(1.0, 95.0);
+                    report(mapped)
+                };
+                encode_video(
+                    &source,
+                    &preset_id,
+                    &partial_path,
+                    Some(cancel_flag.as_ref()),
+                    Some(&mut on_progress),
+                    strip_metadata,
+                )
+            });
             if result.is_ok() && !report_progress(96.0) {
                 return Err("cancelled".to_string());
             }
@@ -662,7 +789,18 @@ fn run_job(
             if !report_progress(20.0) {
                 return Err("cancelled".to_string());
             }
-            let result = encode_pdf(&source, &preset_id, &partial_path, Some(cancel.as_ref()));
+            let source = source.clone();
+            let preset_id = preset_id.clone();
+            let partial_path = partial_path.clone();
+            let cancel_flag = Arc::clone(&cancel);
+            let result = supervised_encode(cancel.as_ref(), NON_VIDEO_ENCODE_WALL, move || {
+                encode_pdf(
+                    &source,
+                    &preset_id,
+                    &partial_path,
+                    Some(cancel_flag.as_ref()),
+                )
+            });
             if result.is_ok() && !report_progress(90.0) {
                 return Err("cancelled".to_string());
             }
@@ -1077,5 +1215,84 @@ mod tests {
             );
         }
         assert!(!job_is_active(&manager, &id));
+        assert!(!job_needs_failed_event(&manager, &id));
+    }
+
+    #[test]
+    fn fail_job_if_active_still_needed_after_cancel() {
+        let manager = JobManager::default();
+        let source = temp_source("cancelled.bin", b"x");
+        let id = "job-cancelled".to_string();
+        {
+            let mut guard = manager.inner.lock().unwrap();
+            guard.jobs.insert(
+                id.clone(),
+                JobRecord {
+                    info: JobInfo {
+                        id: id.clone(),
+                        source_path: source.to_string_lossy().into_owned(),
+                        media_kind: MediaKind::Image,
+                        preset_id: "balanced".into(),
+                        status: JobStatus::Cancelled,
+                        percent: 40.0,
+                        error: Some("cancelled".into()),
+                        output_path: None,
+                        original_bytes: Some(1),
+                        result_bytes: None,
+                        duration_ms: None,
+                    },
+                    cancel: Arc::new(AtomicBool::new(true)),
+                },
+            );
+        }
+        // Cancel IPC already marked Cancelled — panic/stall recovery must still emit Failed.
+        assert!(!job_is_active(&manager, &id));
+        assert!(job_needs_failed_event(&manager, &id));
+    }
+
+    #[test]
+    fn supervised_encode_force_fails_when_cancel_ignored() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (block_tx, block_rx) = mpsc::channel::<()>();
+        let cancel_w = Arc::clone(&cancel);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            cancel_w.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let grace = Duration::from_millis(80);
+        let err = supervised_encode_with(
+            cancel.as_ref(),
+            Duration::from_secs(60),
+            grace,
+            move || {
+                let _ = block_rx.recv();
+                Ok(())
+            },
+        )
+        .expect_err("expected cancel force-fail");
+        assert_eq!(err, "cancelled");
+        assert!(started.elapsed() >= grace);
+        drop(block_tx); // let the abandoned encode thread exit
+    }
+
+    #[test]
+    fn supervised_encode_force_fails_on_wall_timeout() {
+        let cancel = AtomicBool::new(false);
+        let (block_tx, block_rx) = mpsc::channel::<()>();
+        let grace = Duration::from_millis(80);
+        let err = supervised_encode_with(
+            &cancel,
+            Duration::from_millis(40),
+            grace,
+            move || {
+                let _ = block_rx.recv();
+                Ok(())
+            },
+        )
+        .expect_err("expected stall");
+        assert_eq!(err, "encoder stalled — no progress");
+        assert!(cancel.load(Ordering::SeqCst));
+        drop(block_tx);
     }
 }

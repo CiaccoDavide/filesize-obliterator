@@ -228,6 +228,8 @@ describe("stalledJobIds", () => {
   it("does not treat sparse image/audio/pdf silence as a stall", () => {
     const now = 60_000;
     const stallMs = 5_000;
+    // Explicit sparse window well above the 59s silence — short video window still fires.
+    const sparseStallMs = 10 * 60_000;
     const lastActivity = new Map<string, number>([
       ["img", 1_000],
       ["aud", 1_000],
@@ -265,7 +267,52 @@ describe("stalledJobIds", () => {
         lastActivity,
         now,
         stallMs,
+        sparseStallMs,
       ),
     ).toEqual(["vid"]);
+  });
+
+  it("stalls hung image/audio/pdf after the sparse window", () => {
+    const now = 700_000;
+    const lastActivity = new Map<string, number>([
+      ["img", 1_000],
+      ["aud", 1_000],
+      ["pdf", 1_000],
+      ["fresh-img", 650_000],
+    ]);
+    expect(
+      stalledJobIds(
+        [
+          row({
+            jobId: "img",
+            phase: "COMPRESSING",
+            mediaKind: "image",
+            percent: 20,
+          }),
+          row({
+            jobId: "aud",
+            phase: "COMPRESSING",
+            mediaKind: "audio",
+            percent: 20,
+          }),
+          row({
+            jobId: "pdf",
+            phase: "COMPRESSING",
+            mediaKind: "pdf",
+            percent: 20,
+          }),
+          row({
+            jobId: "fresh-img",
+            phase: "COMPRESSING",
+            mediaKind: "image",
+            percent: 20,
+          }),
+        ],
+        lastActivity,
+        now,
+        45_000,
+        10 * 60_000,
+      ),
+    ).toEqual(["img", "aud", "pdf"]);
   });
 });

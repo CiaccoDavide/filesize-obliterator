@@ -8,6 +8,7 @@ import {
   dismissFailedRows,
   ENCODER_STALL_ERROR,
   ENCODER_STALL_MS,
+  ENCODER_SPARSE_STALL_MS,
   failedRowsForRetry,
   normalizeOpsError,
   stalledJobIds,
@@ -130,6 +131,7 @@ export function useCompressProgress() {
         lastActivityRef.current,
         Date.now(),
         ENCODER_STALL_MS,
+        ENCODER_SPARSE_STALL_MS,
       ).filter((id) => !stallCancelInFlightRef.current.has(id));
       if (stalled.length === 0) return;
 
