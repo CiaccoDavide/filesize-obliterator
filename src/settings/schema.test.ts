@@ -16,6 +16,7 @@ describe("defaultSettings", () => {
     expect(s.uiDensity).toBe("compact");
     expect(s.defaultPresets).toEqual({});
     expect(s.windowSize).toBeNull();
+    expect(s.briefingSeen).toBe(false);
   });
 });
 
@@ -28,6 +29,7 @@ describe("parseSettings", () => {
       uiDensity: "regular",
       defaultPresets: { image: "image-small", pdf: "pdf-screen" },
       windowSize: { width: 960, height: 720 },
+      briefingSeen: true,
     });
     expect(parsed).toEqual({
       version: 1,
@@ -36,7 +38,12 @@ describe("parseSettings", () => {
       uiDensity: "regular",
       defaultPresets: { image: "image-small", pdf: "pdf-screen" },
       windowSize: { width: 960, height: 720 },
+      briefingSeen: true,
     });
+  });
+
+  it("defaults missing briefingSeen to false (additive)", () => {
+    expect(parseSettings({ version: 1 }).briefingSeen).toBe(false);
   });
 
   it("recovers to defaults for corrupt JSON text", () => {

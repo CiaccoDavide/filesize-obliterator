@@ -181,6 +181,17 @@ describe("resolveShortcutDispatch", () => {
     ).toBe("ignore");
   });
 
+  it("ignores Escape abort while briefing is open (briefing owns dismiss)", () => {
+    expect(
+      resolveShortcutDispatch("abortAll", {
+        canAbort: true,
+        helpOpen: false,
+        previewOpen: false,
+        briefingOpen: true,
+      }),
+    ).toBe("ignore");
+  });
+
   it("ignores Escape abort while image preview is open (preview owns dismiss)", () => {
     expect(
       resolveShortcutDispatch("abortAll", {

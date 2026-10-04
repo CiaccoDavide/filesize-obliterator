@@ -24,6 +24,8 @@ export type AppSettings = {
   uiDensity: UiDensity;
   /** Last logical window size; null when never captured. */
   windowSize: WindowSize | null;
+  /** True after the operator ACKs the first-run briefing overlay. */
+  briefingSeen: boolean;
 };
 
 const KIND_SET = new Set<MediaKind>(["image", "audio", "video", "pdf"]);
@@ -38,6 +40,7 @@ export function defaultSettings(): AppSettings {
     stripMetadata: true,
     uiDensity: "compact",
     windowSize: null,
+    briefingSeen: false,
   };
 }
 
@@ -114,6 +117,10 @@ export function parseSettings(raw: unknown): AppSettings {
       obj.windowSize === undefined
         ? defaults.windowSize
         : parseWindowSize(obj.windowSize),
+    briefingSeen:
+      typeof obj.briefingSeen === "boolean"
+        ? obj.briefingSeen
+        : defaults.briefingSeen,
   };
 }
 
