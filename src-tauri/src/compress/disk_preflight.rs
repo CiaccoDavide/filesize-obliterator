@@ -3,7 +3,6 @@
 //! Offline syscalls only (`statvfs` / `GetDiskFreeSpaceExW`). Never writes.
 
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -208,7 +207,8 @@ extern "system" {
 #[cfg(unix)]
 fn volume_key(path: &Path) -> Result<u64, String> {
     use std::os::unix::fs::MetadataExt;
-    let meta = fs::metadata(path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
+    let meta = std::fs::metadata(path)
+        .map_err(|e| format!("cannot stat {}: {e}", path.display()))?;
     Ok(meta.dev())
 }
 
@@ -326,6 +326,7 @@ pub fn preflight_request(request: DiskPreflightRequest) -> Result<DiskPreflightR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]

@@ -68,15 +68,15 @@ Rust resolves **bundled ffmpeg** beside the executable / under `resources` / `bi
 After a local or CI build, verify offline behavior (no network):
 
 1. **Config wiring:** `bundle.externalBin` lists only `binaries/ffmpeg` (no `gs`). `scripts/fetch-sidecars.sh` stages ffmpeg; leftover `binaries/gs-*` must not exist.
-2. **Unit path resolution:** `FO_REQUIRE_ENCODERS=1 npm run test:rust` — ffmpeg resolves from staged sidecar or PATH; Ghostscript from PATH; soft-skips are disabled.
+2. **Unit path resolution:** `FO_REQUIRE_ENCODERS=1 npm run test:rust` — ffmpeg must resolve from staged sidecar or PATH (hard fail if missing). Ghostscript soft-skips when absent (AGPL PATH-only exception).
 3. **Image smoke:** compress a JPEG/PNG in the built app (no ffmpeg/gs required).
-4. **Video smoke (optional):** with staged/real ffmpeg, compress a short MP4 offline.
-5. **PDF smoke (optional):** with host Ghostscript on PATH, compress a PDF offline.
+4. **Video smoke (required when ffmpeg is staged):** with a working staged/bundled ffmpeg, compress a short MP4 offline. Do not ship/release without this when `binaries/ffmpeg-*` is present.
+5. **PDF smoke (optional — GS PATH exception):** only when host Ghostscript is on PATH / `GS_PATH`; soft-skip is OK when gs is absent. Never claim PDF works offline OOTB without a host install.
 6. **Clean-machine ffmpeg:** on a host without Homebrew/apt ffmpeg, the bundled sidecar still answers `ffmpeg -version` (release builds must use the download path, not `--from-path`).
 
 ### CI
 
-GitHub Actions (`.github/workflows/ci.yml`) runs a **macOS / Windows / Linux** matrix: stage ffmpeg (download, stubs fallback) → typecheck → Vitest → `FO_REQUIRE_ENCODERS=1` cargo test → download relocatable ffmpeg → `tauri build`. OS packages supply PATH Ghostscript for PDF tests. Failures show under the Checks tab on the PR.
+GitHub Actions (`.github/workflows/ci.yml`) runs a **macOS / Windows / Linux** matrix: stage ffmpeg (download, stubs fallback) → typecheck → Vitest → `FO_REQUIRE_ENCODERS=1` cargo test (ffmpeg hard-required; PDF soft-skips if gs missing) → download relocatable ffmpeg → `tauri build`. OS packages best-effort install PATH Ghostscript for PDF tests. Failures show under the Checks tab on the PR.
 
 ## Useful checks
 
@@ -85,7 +85,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs a **macOS / Windows / Linux** m
 npm run typecheck
 npm test                 # Vitest (frontend unit tests)
 npm run test:rust        # cargo test -- --nocapture in src-tauri
-FO_REQUIRE_ENCODERS=1 npm run test:rust   # fail hard if ffmpeg/gs missing
+FO_REQUIRE_ENCODERS=1 npm run test:rust   # fail hard if ffmpeg missing (PDF soft-skips without gs)
 npm run test:all         # frontend + Rust
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
@@ -94,7 +94,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 
 - **Frontend:** `npm test` (Vitest). Offline; no network.
 - **Rust:** `npm run test:rust` (`cargo test --manifest-path src-tauri/Cargo.toml -- --nocapture`). Covers `_compressed` path rules and a smoke encode per media kind against fixtures under `src-tauri/tests/fixtures/`. `--nocapture` keeps soft-skip reasons visible on stderr.
-- **Optional tools:** Video smoke needs a working `ffmpeg` (staged sidecar or PATH); PDF smoke needs Ghostscript on PATH. When either is missing, those tests print `ignoring test: missing tool…` on stderr and soft-skip **unless** `FO_REQUIRE_ENCODERS=1` (CI). Image and audio smokes use pure-Rust codecs and always run.
+- **Optional tools:** Video smoke needs a working `ffmpeg` (staged sidecar or PATH); PDF smoke needs Ghostscript on PATH. When either is missing, those tests print `ignoring test: missing tool…` on stderr and soft-skip — **except** `FO_REQUIRE_ENCODERS=1` (CI) hard-requires ffmpeg. PDF soft-skips remain allowed under the AGPL PATH-only exception. Image and audio smokes use pure-Rust codecs and always run.
 - Paths under test use temp dirs only — never machine-specific absolute paths outside of temp.
 
 Folder drops expand one level of immediate files (nested directories are ignored).

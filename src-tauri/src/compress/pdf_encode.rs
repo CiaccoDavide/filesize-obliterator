@@ -276,14 +276,12 @@ mod tests {
     }
 
     /// Soft-skip gate: when Ghostscript is absent, print an explicit ignore reason and return
-    /// `None` so CI / bare hosts skip PDF encode tests instead of failing.
+    /// `None`. PDF stays optional under the AGPL PATH-only exception — `FO_REQUIRE_ENCODERS`
+    /// hard-requires ffmpeg only (see `sidecar::encoders_required`).
     fn require_gs() -> Option<PathBuf> {
         match resolve_ghostscript() {
             Ok(p) => Some(p),
             Err(e) => {
-                if crate::compress::sidecar::encoders_required() {
-                    panic!("FO_REQUIRE_ENCODERS=1 but ghostscript missing: {e}");
-                }
                 eprintln!("ignoring test: {e}");
                 None
             }

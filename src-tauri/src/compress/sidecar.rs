@@ -214,7 +214,10 @@ pub fn resolve_ghostscript() -> Result<PathBuf, String> {
     resolve_tool(&GHOSTSCRIPT, "-v")
 }
 
-/// When `FO_REQUIRE_ENCODERS=1`, encode soft-skips become hard failures (CI).
+/// When `FO_REQUIRE_ENCODERS=1`, **ffmpeg** soft-skips become hard failures (CI).
+///
+/// Ghostscript remains soft-skippable: AGPL PATH-only exception means PDF tests
+/// must not fail the matrix when `gs` / `gswin64c` is absent.
 #[cfg(test)]
 pub fn encoders_required() -> bool {
     matches!(
@@ -361,20 +364,18 @@ mod tests {
     }
 
     #[test]
-    fn path_ghostscript_resolves_when_encoders_required() {
-        if !encoders_required() {
-            match resolve_ghostscript() {
-                Ok(p) => assert!(p.as_os_str().len() > 0),
-                Err(e) => eprintln!("ignoring test: {e}"),
+    fn path_ghostscript_soft_skips_when_absent() {
+        // GS is PATH-only (AGPL) — never hard-fail under FO_REQUIRE_ENCODERS.
+        match resolve_ghostscript() {
+            Ok(p) => {
+                assert!(p.as_os_str().len() > 0);
+                assert!(
+                    probe_version(&p, "-v"),
+                    "resolved ghostscript must answer -v: {}",
+                    p.display()
+                );
             }
-            return;
+            Err(e) => eprintln!("ignoring test: {e}"),
         }
-        let path =
-            resolve_ghostscript().expect("FO_REQUIRE_ENCODERS=1 requires Ghostscript on PATH");
-        assert!(
-            probe_version(&path, "-v"),
-            "resolved ghostscript must answer -v: {}",
-            path.display()
-        );
     }
 }
