@@ -7,6 +7,7 @@ mod manager;
 mod output;
 mod pdf_encode;
 mod presets;
+mod sidecar;
 mod skip;
 mod state;
 mod types;
@@ -14,6 +15,7 @@ mod video_encode;
 
 pub use disk_preflight::{DiskPreflightRequest, DiskPreflightResult};
 pub use estimate::{CompressEstimateRequest, CompressEstimateResult};
+#[allow(unused_imports)] // re-exported for UI/IPC consumers; exercised in format_support tests
 pub use format_support::{image_format_capabilities, FormatAvailability, FormatCapability};
 
 pub use image_encode::prepare_preview_raster;

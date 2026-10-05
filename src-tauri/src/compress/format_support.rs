@@ -9,17 +9,21 @@ use std::process::{Command, Stdio};
 use serde::Serialize;
 
 /// Still-image containers decoded by the bundled `image` crate (no platform tools).
+#[allow(dead_code)] // public capability table for docs/UI
 pub const BUNDLED_STILL_IMAGE_EXTS: &[&str] =
     &["jpg", "jpeg", "png", "webp", "gif", "tif", "tiff", "bmp"];
 
 /// Image containers that require a platform decoder.
+#[allow(dead_code)] // public capability table for docs/UI
 pub const PLATFORM_IMAGE_EXTS: &[&str] = &["heic", "heif"];
 
 /// Image containers recognized but never decoded in this build.
+#[allow(dead_code)] // public capability table for docs/UI
 pub const UNSUPPORTED_IMAGE_EXTS: &[&str] = &["avif"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // re-exported; constructed via image_format_capabilities
 pub enum FormatAvailability {
     /// Offline encode/decode path is available on this machine.
     Available,
@@ -29,6 +33,7 @@ pub enum FormatAvailability {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // re-exported; constructed via image_format_capabilities
 pub struct FormatCapability {
     pub id: &'static str,
     pub availability: FormatAvailability,
@@ -36,6 +41,7 @@ pub struct FormatCapability {
 }
 
 /// Snapshot of extended-format capabilities for docs/tests/UI.
+#[allow(dead_code)] // re-exported for UI; covered by unit tests
 pub fn image_format_capabilities() -> Vec<FormatCapability> {
     vec![
         FormatCapability {

@@ -1,13 +1,14 @@
-//! Offline PDF compress via a local Ghostscript binary (sidecar / PATH / `GS_PATH`).
+//! Offline PDF compress via a local Ghostscript binary (PATH / `GS_PATH` only; not bundled).
 //!
 //! Inputs: `.pdf`. Output: `.pdf` at print / ebook / screen image DPI targets.
 //! No network. Missing Ghostscript → `missing tool: ghostscript…`.
+//! AGPL Ghostscript is intentionally not redistributed — see THIRD_PARTY_NOTICES.md.
 //! Encrypted/password PDFs → clear `encrypted` error (no password UI).
 //! Bad input → `unsupported or corrupt pdf…`.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -34,65 +35,7 @@ fn cancelled(cancel: Option<&AtomicBool>) -> bool {
     cancel.is_some_and(|c| c.load(Ordering::SeqCst))
 }
 
-/// Resolve local Ghostscript without network. Order: `GS_PATH`, sidecar-adjacent, then `PATH`.
-pub fn resolve_ghostscript() -> Result<PathBuf, String> {
-    if let Ok(explicit) = std::env::var("GS_PATH") {
-        let p = PathBuf::from(explicit.trim());
-        if p.is_file() {
-            return Ok(p);
-        }
-        return Err(format!(
-            "missing tool: ghostscript (GS_PATH set but not a file: {})",
-            p.display()
-        ));
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for name in ["gs", "gswin64c.exe", "gswin32c.exe", "ghostscript"] {
-                let candidate = dir.join(name);
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
-            }
-            for rel in [
-                "resources/gs",
-                "../Resources/gs",
-                "binaries/gs",
-                "resources/gswin64c.exe",
-                "binaries/gswin64c.exe",
-            ] {
-                let candidate = dir.join(rel);
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
-            }
-        }
-    }
-
-    which_ghostscript().ok_or_else(|| {
-        "missing tool: ghostscript (not found on PATH, beside the app, or via GS_PATH). \
-Install Ghostscript locally or bundle it as a sidecar for offline PDF compression."
-            .to_string()
-    })
-}
-
-fn which_ghostscript() -> Option<PathBuf> {
-    // On Windows the first name (`gs`) is often absent; NotFound must not abort the loop
-    // before `gswin64c` / `gswin32c` are tried.
-    for name in ["gs", "gswin64c", "gswin32c", "ghostscript"] {
-        match Command::new(name)
-            .arg("-v")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-        {
-            Ok(status) if status.success() => return Some(PathBuf::from(name)),
-            Ok(_) | Err(_) => continue,
-        }
-    }
-    None
-}
+pub use crate::compress::sidecar::resolve_ghostscript;
 
 /// Reject password-protected PDFs up front (no password UI in this task).
 fn reject_encrypted_pdf(source: &Path) -> Result<(), String> {
@@ -311,6 +254,7 @@ pub fn encode_pdf(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use super::*;
     use crate::compress::output::prepare_output_path;
     use crate::compress::presets::{PDF_EBOOK, PDF_PRINT, PDF_SCREEN};
@@ -332,7 +276,8 @@ mod tests {
     }
 
     /// Soft-skip gate: when Ghostscript is absent, print an explicit ignore reason and return
-    /// `None` so CI / bare hosts skip PDF encode tests instead of failing.
+    /// `None`. PDF stays optional under the AGPL PATH-only exception — `FO_REQUIRE_ENCODERS`
+    /// hard-requires ffmpeg only (see `sidecar::encoders_required`).
     fn require_gs() -> Option<PathBuf> {
         match resolve_ghostscript() {
             Ok(p) => Some(p),

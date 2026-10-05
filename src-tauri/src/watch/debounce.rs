@@ -75,6 +75,7 @@ impl SizeStableTracker {
         }
     }
 
+    #[allow(dead_code)] // reserved for path eviction
     pub fn forget(&mut self, path: &str) {
         self.pending.remove(path);
         self.ignored.remove(path);

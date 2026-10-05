@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
+    "fetch:sidecars": "bash scripts/fetch-sidecars.sh",
     "vite:dev": "vite",
     "vite:build": "tsc && vite build",
     "preview": "vite preview",

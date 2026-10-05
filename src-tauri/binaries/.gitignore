@@ -1,0 +1,14 @@
+# Sidecar binaries for Tauri `bundle.externalBin` (ffmpeg only).
+#
+# Blobs are gitignored — fetch before `npm run build` / `cargo test`:
+#   ./scripts/fetch-sidecars.sh
+#   ./scripts/fetch-sidecars.sh --stubs   # CI/local placeholders
+#
+# Expected names (Tauri target-triple suffix):
+#   ffmpeg-<rustc-host-triple>[.exe]
+#
+# Ghostscript is intentionally NOT staged here (AGPL — PATH-only).
+# See README “Desktop packaging” and THIRD_PARTY_NOTICES.md.
+*
+!.gitignore
+!README.md

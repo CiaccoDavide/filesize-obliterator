@@ -62,7 +62,6 @@ fn file_probe(path: &Path, bytes: u64, from_directory: bool) -> Result<ResolvedP
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn resolves_file_and_expands_directory_one_level() {
@@ -79,15 +78,14 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
 
         let file_a = dir.join("a.png");
-        let mut f = fs::File::create(&file_a).unwrap();
-        write!(f, "abc").unwrap();
+        // Close handles before resolve — Windows metadata can report 0 while a writer is open.
+        fs::write(&file_a, b"abc").unwrap();
 
         let nested_file = nested.join("deep.jpg");
-        fs::File::create(&nested_file).unwrap();
+        fs::write(&nested_file, b"").unwrap();
 
         let lone = dir.join("lone.mp3");
-        let mut f2 = fs::File::create(&lone).unwrap();
-        write!(f2, "xy").unwrap();
+        fs::write(&lone, b"xy").unwrap();
 
         let resolved = intake_resolve(vec![
             lone.to_string_lossy().into_owned(),
