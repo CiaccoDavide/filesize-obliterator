@@ -312,3 +312,68 @@ fn settings_persist_locally_without_network_plugins() {
         "frontend must not add network plugins for settings sync"
     );
 }
+
+#[test]
+fn bundle_external_bin_lists_ffmpeg_and_gs() {
+    let conf = parse_json(&repo_root().join("src-tauri/tauri.conf.json"));
+    let bins = conf
+        .pointer("/bundle/externalBin")
+        .and_then(|v| v.as_array())
+        .expect("bundle.externalBin must be an array");
+    let names: Vec<&str> = bins.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        names.iter().any(|n| *n == "binaries/ffmpeg"),
+        "externalBin must include binaries/ffmpeg: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| *n == "binaries/gs"),
+        "externalBin must include binaries/gs: {names:?}"
+    );
+}
+
+#[test]
+fn product_metadata_and_icons_are_configured() {
+    let conf = parse_json(&repo_root().join("src-tauri/tauri.conf.json"));
+    assert_eq!(
+        conf.get("productName").and_then(|v| v.as_str()),
+        Some("Filesize Obliterator")
+    );
+    assert_eq!(
+        conf.get("identifier").and_then(|v| v.as_str()),
+        Some("com.filesizeobliterator.desktop")
+    );
+    let icons = conf
+        .pointer("/bundle/icon")
+        .and_then(|v| v.as_array())
+        .expect("bundle.icon");
+    assert!(icons.len() >= 4, "expected platform icons: {icons:?}");
+    for icon in icons {
+        let rel = icon.as_str().expect("icon path string");
+        let path = repo_root().join("src-tauri").join(rel);
+        assert!(path.is_file(), "missing icon {}", path.display());
+    }
+}
+
+#[test]
+fn packaging_docs_and_fetch_script_exist() {
+    let root = repo_root();
+    assert!(root.join("scripts/fetch-sidecars.sh").is_file());
+    assert!(root.join("THIRD_PARTY_NOTICES.md").is_file());
+    assert!(root.join("src-tauri/binaries/README.md").is_file());
+    assert!(root.join(".github/workflows/ci.yml").is_file());
+
+    let readme = read_to_string(&root.join("README.md")).to_lowercase();
+    assert!(
+        readme.contains("desktop packaging")
+            && readme.contains("fetch-sidecars")
+            && readme.contains("macos")
+            && readme.contains("windows")
+            && readme.contains("linux"),
+        "README must document per-OS desktop packaging + fetch script"
+    );
+    let notices = read_to_string(&root.join("THIRD_PARTY_NOTICES.md")).to_lowercase();
+    assert!(
+        notices.contains("ffmpeg") && notices.contains("ghostscript"),
+        "THIRD_PARTY_NOTICES must cover ffmpeg and Ghostscript"
+    );
+}

@@ -46,54 +46,7 @@ fn cancelled(cancel: Option<&AtomicBool>) -> bool {
     cancel.is_some_and(|c| c.load(Ordering::SeqCst))
 }
 
-/// Resolve local ffmpeg without network. Order: `FFMPEG_PATH`, sidecar-adjacent, then `PATH`.
-pub fn resolve_ffmpeg() -> Result<PathBuf, String> {
-    if let Ok(explicit) = std::env::var("FFMPEG_PATH") {
-        let p = PathBuf::from(explicit.trim());
-        if p.is_file() {
-            return Ok(p);
-        }
-        return Err(format!(
-            "missing tool: ffmpeg (FFMPEG_PATH set but not a file: {})",
-            p.display()
-        ));
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for name in ["ffmpeg", "ffmpeg.exe"] {
-                let candidate = dir.join(name);
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
-            }
-            // Tauri externalBin layout: resources/ or MacOS sibling Resources
-            for rel in ["resources/ffmpeg", "../Resources/ffmpeg", "binaries/ffmpeg"] {
-                let candidate = dir.join(rel);
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
-            }
-        }
-    }
-
-    which_ffmpeg().ok_or_else(|| {
-        "missing tool: ffmpeg (not found on PATH, beside the app, or via FFMPEG_PATH). \
-Install ffmpeg locally or bundle it as a sidecar for offline video compression."
-            .to_string()
-    })
-}
-
-fn which_ffmpeg() -> Option<PathBuf> {
-    // Prefer a real spawn check over shell `which` so Windows/macOS/Linux share one path.
-    let status = Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()?;
-    status.success().then(|| PathBuf::from("ffmpeg"))
-}
+pub use crate::compress::sidecar::resolve_ffmpeg;
 
 fn probe_duration_secs(ffmpeg: &Path, source: &Path) -> Option<f64> {
     let output = Command::new(ffmpeg)

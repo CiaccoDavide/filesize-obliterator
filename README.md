@@ -16,7 +16,10 @@ This product is **offline-only**: the shipped app does not require internet conn
 
 ```bash
 npm install
+./scripts/fetch-sidecars.sh --from-path   # requires local ffmpeg + Ghostscript for video/PDF bundles
 ```
+
+`tauri build` / `tauri dev` expect triple-suffixed sidecars under `src-tauri/binaries/` (see `bundle.externalBin`). Image/audio compress work without those tools at runtime, but the Tauri CLI still needs the files present to link externalBin — install ffmpeg + Ghostscript (or run the fetch script after installing them) before `npm run dev` / `npm run build`.
 
 ## Develop
 
@@ -28,11 +31,39 @@ npm run dev
 
 ## Build
 
-Production frontend + native bundle:
+Production frontend + native bundle (requires sidecars — see **Desktop packaging**):
 
 ```bash
-npm run build
+./scripts/fetch-sidecars.sh   # stage ffmpeg + Ghostscript into src-tauri/binaries/
+npm run build                 # tauri build → DMG/app, MSI/NSIS, AppImage/deb (per OS)
 ```
+
+`tauri.conf.json` sets `productName` **Filesize Obliterator**, identifier `com.filesizeobliterator.desktop`, icons under `src-tauri/icons/`, and `bundle.externalBin` for `binaries/ffmpeg` + `binaries/gs`. Release apps stay offline-only (CSP / no updater) — see `src-tauri/tests/offline_policy.rs`.
+
+## Desktop packaging
+
+Installable offline bundles for **macOS**, **Windows**, and **Linux** (Tauri 2 defaults). Codec sidecars are **not** committed; fetch before every release build.
+
+| Step | Command |
+|------|---------|
+| Stage tools for this host | `./scripts/fetch-sidecars.sh` or `npm run fetch:sidecars` |
+| Force PATH copy (CI-friendly) | `./scripts/fetch-sidecars.sh --from-path` |
+| Best-effort multi-OS downloads | `./scripts/fetch-sidecars.sh --all` |
+| Build installer | `npm run build` |
+
+### Per-OS notes
+
+| OS | Artifacts (Tauri `bundle.targets: all`) | Sidecars | Signing |
+|----|----------------------------------------|----------|---------|
+| **macOS** | `.app` + `.dmg` | Fetch copies Homebrew `ffmpeg` / `gs` into `src-tauri/binaries/ffmpeg-<triple>` and `gs-<triple>` when no static URL is pinned. **Warning:** Homebrew binaries are dylib-linked — OK for same-machine CI/dev; for clean offline installs, drop in a **static** ffmpeg (and a relocatable Ghostscript tree or PATH drop-in) before release. Smoke-test video + PDF on a machine without Homebrew. | Optional maintainer notarization when Apple secrets exist — not required for local/CI artifacts. |
+| **Windows** | `.msi` and/or NSIS `.exe` | Fetch copies `ffmpeg.exe` and `gswin64c.exe` (staged as `gs-<triple>.exe`). Install [Ghostscript](https://ghostscript.com/) + ffmpeg on the build machine first, or let CI Chocolatey packages feed `--from-path`. | Optional Authenticode — maintainer-only. |
+| **Linux** | `.AppImage`, `.deb` (and other enabled Tauri targets) | Prefer `./scripts/fetch-sidecars.sh` (static ffmpeg URL when available) plus system `gs`, or `--from-path` after `apt install ffmpeg ghostscript`. | None by default. |
+
+Rust resolves bundled tools beside the executable / under `resources` / `binaries` **without** developer PATH hacks (`compress::sidecar`). Dev machines may still use PATH. Licenses: [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
+
+### CI
+
+GitHub Actions (`.github/workflows/ci.yml`) runs a **macOS / Windows / Linux** matrix: typecheck, Vitest, `cargo test`, then `fetch-sidecars --from-path` + `tauri build`. Video/PDF encode smokes soft-skip only when tools are missing; the workflow installs OS packages so smokes usually run. Failures on Actions show under the Checks tab on the PR.
 
 ## Useful checks
 
@@ -122,7 +153,7 @@ Supported inputs: MP3, WAV, AAC, M4A, FLAC. Job errors distinguish **missing cod
 
 ## Video compression (offline)
 
-Video is re-encoded locally with **ffmpeg** (H.264 + AAC → `.mp4`). The binary is resolved from `FFMPEG_PATH`, a sidecar next to the app bundle, or `PATH`. Missing ffmpeg fails with a clear **missing tool** error (no network download). Built-in presets:
+Video is re-encoded locally with **ffmpeg** (H.264 + AAC → `.mp4`). Release bundles vendor ffmpeg via Tauri `externalBin`; at runtime the binary is resolved from `FFMPEG_PATH`, the bundled sidecar beside the app, or `PATH` (dev). Missing ffmpeg fails with a clear **missing tool** error (no network download). Built-in presets:
 
 | Id | Label | Output | Notes |
 |----|-------|--------|-------|
@@ -134,7 +165,7 @@ Video is re-encoded locally with **ffmpeg** (H.264 + AAC → `.mp4`). The binary
 
 ## PDF compression (offline)
 
-PDFs are recompressed locally with **Ghostscript** (`pdfwrite` + `PDFSETTINGS`). The binary is resolved from `GS_PATH`, a sidecar next to the app bundle, or `PATH` (`gs` / `gswin64c`). Missing Ghostscript fails with a clear **missing tool** error (no network download). Built-in presets:
+PDFs are recompressed locally with **Ghostscript** (`pdfwrite` + `PDFSETTINGS`). Release bundles vendor `gs` via Tauri `externalBin`; at runtime the binary is resolved from `GS_PATH`, the bundled sidecar beside the app, or `PATH` (`gs` / `gswin64c`, dev). Missing Ghostscript fails with a clear **missing tool** error (no network download). Built-in presets:
 
 | Id | Label | Output | Notes |
 |----|-------|--------|-------|
@@ -150,4 +181,7 @@ PDFs are recompressed locally with **Ghostscript** (`pdfwrite` + `PDFSETTINGS`).
 |------|------|
 | `src/` | React + TypeScript UI (Vite) |
 | `src-tauri/` | Rust / Tauri backend (`ping`, `app_info` commands) |
+| `src-tauri/binaries/` | Fetched encoder sidecars (gitignored blobs; see `scripts/fetch-sidecars.sh`) |
+| `scripts/fetch-sidecars.sh` | Stage ffmpeg + Ghostscript for `bundle.externalBin` |
+| `THIRD_PARTY_NOTICES.md` | Licenses for vendored tools |
 | `tasks/` | Implementation task briefs |

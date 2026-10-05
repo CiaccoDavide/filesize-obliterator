@@ -1,0 +1,153 @@
+# CI — test + desktop build matrix (issue #16 / #17)
+
+# Offline-friendly: no SaaS compression APIs. Video/PDF encode smokes soft-skip when
+# ffmpeg/gs are absent; we install them via OS packages when available so smokes run.
+# Release sidecars: `scripts/fetch-sidecars.sh` stages binaries into src-tauri/binaries/
+# (gitignored) before `tauri build`. If fetch cannot stage tools, the build job fails
+# with a clear log — re-run after installing ffmpeg + Ghostscript on the runner.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux WebKit / Tauri deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            ffmpeg \
+            ghostscript
+
+      - name: Install macOS encoder tools
+        if: runner.os == 'macOS'
+        run: |
+          brew install ffmpeg ghostscript || brew upgrade ffmpeg ghostscript || true
+          command -v ffmpeg
+          command -v gs
+
+      - name: Install Windows encoder tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ffmpeg ghostscript -y --no-progress
+          Get-Command ffmpeg
+          Get-Command gswin64c -ErrorAction SilentlyContinue
+          Get-Command gs -ErrorAction SilentlyContinue
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Frontend tests
+        run: npm test
+
+      - name: Rust tests
+        run: npm run test:rust
+
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux WebKit / Tauri deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            ffmpeg \
+            ghostscript
+
+      - name: Install macOS encoder tools
+        if: runner.os == 'macOS'
+        run: |
+          brew install ffmpeg ghostscript || brew upgrade ffmpeg ghostscript || true
+
+      - name: Install Windows encoder tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install ffmpeg ghostscript -y --no-progress
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Stage sidecars (externalBin)
+        shell: bash
+        run: |
+          chmod +x scripts/fetch-sidecars.sh
+          ./scripts/fetch-sidecars.sh --from-path
+          ls -la src-tauri/binaries/
+
+      - name: Tauri build
+        run: npm run build
