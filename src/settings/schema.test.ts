@@ -13,9 +13,12 @@ describe("defaultSettings", () => {
     expect(s.version).toBe(SETTINGS_VERSION);
     expect(s.concurrency).toBe(2);
     expect(s.stripMetadata).toBe(true);
+    expect(s.preferHardware).toBe(true);
     expect(s.uiDensity).toBe("compact");
     expect(s.defaultPresets).toEqual({});
     expect(s.windowSize).toBeNull();
+    expect(s.briefingSeen).toBe(false);
+    expect(s.notifyOnComplete).toBe(true);
   });
 });
 
@@ -25,18 +28,36 @@ describe("parseSettings", () => {
       version: 1,
       concurrency: 1,
       stripMetadata: false,
+      preferHardware: false,
       uiDensity: "regular",
       defaultPresets: { image: "image-small", pdf: "pdf-screen" },
       windowSize: { width: 960, height: 720 },
+      briefingSeen: true,
+      notifyOnComplete: false,
     });
     expect(parsed).toEqual({
       version: 1,
       concurrency: 1,
       stripMetadata: false,
+      preferHardware: false,
       uiDensity: "regular",
       defaultPresets: { image: "image-small", pdf: "pdf-screen" },
       windowSize: { width: 960, height: 720 },
+      briefingSeen: true,
+      notifyOnComplete: false,
     });
+  });
+
+  it("defaults missing briefingSeen to false (additive)", () => {
+    expect(parseSettings({ version: 1 }).briefingSeen).toBe(false);
+  });
+
+  it("defaults missing preferHardware to true (additive)", () => {
+    expect(parseSettings({ version: 1 }).preferHardware).toBe(true);
+  });
+
+  it("defaults missing notifyOnComplete to true (additive)", () => {
+    expect(parseSettings({ version: 1 }).notifyOnComplete).toBe(true);
   });
 
   it("recovers to defaults for corrupt JSON text", () => {
@@ -75,6 +96,7 @@ describe("parseSettings", () => {
     const parsed = parseSettings({ version: 1 });
     expect(parsed.concurrency).toBe(2);
     expect(parsed.stripMetadata).toBe(true);
+    expect(parsed.preferHardware).toBe(true);
     expect(parsed.uiDensity).toBe("compact");
     expect(parsed.windowSize).toBeNull();
   });
@@ -97,6 +119,7 @@ describe("serializeSettings", () => {
       version: 1,
       concurrency: 3,
       stripMetadata: false,
+      preferHardware: false,
       uiDensity: "regular",
       defaultPresets: { image: "image-high" },
       windowSize: { width: 800, height: 600 },

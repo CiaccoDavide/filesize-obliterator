@@ -1,0 +1,40 @@
+{
+  "issue": 30,
+  "task": "030-first-run-hud-briefing",
+  "branch": "ship/30-first-run-briefing",
+  "base": "origin/main",
+  "closes": "#30",
+  "status": "implemented",
+  "testsPassed": true,
+  "acceptance": [
+    {
+      "id": "first-launch-once",
+      "met": true,
+      "via": "isBriefingOpen after settings load when briefingSeen=false; BriefingOverlay mounted from App"
+    },
+    {
+      "id": "ack-persists",
+      "met": true,
+      "via": "ACKNOWLEDGE → patch({ briefingSeen: true }); reopen only via BRIEFING (helpRequested)"
+    },
+    {
+      "id": "copy-offline-compressed",
+      "met": true,
+      "via": "BRIEFING_STEPS mention `_compressed/` and offline; briefing.test.ts"
+    },
+    {
+      "id": "ice-hud-framing",
+      "met": true,
+      "via": "preview-overlay + hud-frame briefing-panel; ACKNOWLEDGE control; operational voice"
+    }
+  ],
+  "choices": {
+    "persist": "additive AppSettings.briefingSeen (TS + Rust serde default false)",
+    "overlayPattern": "reuse preview-overlay / ImageComparePreview chrome",
+    "reopen": "BRIEFING header control sets helpRequested"
+  },
+  "notes": [
+    "No lint script in package.json; typecheck + vitest + rust settings tests run green.",
+    "Esc/scrim call onAcknowledge (same as ACKNOWLEDGE)."
+  ]
+}

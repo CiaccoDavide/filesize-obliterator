@@ -181,6 +181,40 @@ describe("buildBatchSummary", () => {
     });
   });
 
+  it("includes watch rows stamped with the current admission generation", () => {
+    // After a manual COMPRESS (gen ≥ 1), watch enqueue must stamp the same
+    // generation or COMPLETE/FAILED watch rows are filtered out of the summary.
+    expect(
+      buildBatchSummary([
+        row({
+          jobId: "manual-ok",
+          phase: "COMPLETE",
+          sourcePath: "/tmp/manual.png",
+          outputPath: "/tmp/_compressed/manual.webp",
+          batchGeneration: 1,
+        }),
+        row({
+          jobId: "watch-ok",
+          phase: "COMPLETE",
+          sourcePath: "/tmp/watch.png",
+          outputPath: "/tmp/_compressed/watch.webp",
+          batchGeneration: 1,
+        }),
+        row({
+          jobId: "watch-fail",
+          phase: "FAILED",
+          sourcePath: "/tmp/watch-bad.png",
+          error: "encoder crashed",
+          batchGeneration: 1,
+        }),
+      ]),
+    ).toMatchObject({
+      status: "PARTIAL",
+      succeeded: 2,
+      failed: 1,
+    });
+  });
+
 });
 
 describe("failedRowsForRetry / dismissFailedRows", () => {

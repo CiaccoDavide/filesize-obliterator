@@ -1,4 +1,5 @@
 mod audio_encode;
+mod disk_preflight;
 mod estimate;
 mod format_support;
 mod image_encode;
@@ -11,6 +12,7 @@ mod state;
 mod types;
 mod video_encode;
 
+pub use disk_preflight::{DiskPreflightRequest, DiskPreflightResult};
 pub use estimate::{CompressEstimateRequest, CompressEstimateResult};
 pub use format_support::{image_format_capabilities, FormatAvailability, FormatCapability};
 
@@ -20,6 +22,7 @@ pub use image_encode::needs_webview_raster;
 pub use manager::JobManager;
 pub use presets::{all_presets, presets_for_kind, PresetInfo};
 pub use types::{CompressStartRequest, JobInfo, MediaKind};
+pub use video_encode::hw_encode_status;
 
 use tauri::AppHandle;
 
@@ -59,4 +62,18 @@ pub fn compress_estimate(
     request: CompressEstimateRequest,
 ) -> Result<CompressEstimateResult, String> {
     estimate::estimate_request(request)
+}
+
+/// Offline disk-space preflight for a batch (free vs needed on output volumes).
+#[tauri::command]
+pub fn compress_disk_preflight(
+    request: DiskPreflightRequest,
+) -> Result<DiskPreflightResult, String> {
+    disk_preflight::preflight_request(request)
+}
+
+/// Offline HW encode capability probe for the settings HUD (`HW: READY` / `HW: UNAVAILABLE`).
+#[tauri::command]
+pub fn compress_hw_encode_status() -> &'static str {
+    hw_encode_status()
 }

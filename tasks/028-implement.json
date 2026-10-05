@@ -1,0 +1,41 @@
+{
+  "issue": 28,
+  "task": "028-disk-space-preflight",
+  "branch": "ship/28-disk-space-preflight",
+  "base": "main",
+  "closes": "#28",
+  "status": "implemented",
+  "acceptance": [
+    {
+      "id": "nearly-full-volume-warn-block",
+      "met": true,
+      "via": "compress_disk_preflight + App beginCompress gate; DISK LOW status with free/need bytes; block refuses start"
+    },
+    {
+      "id": "small-batch-no-material-delay",
+      "met": true,
+      "via": "One offline free-space syscall per volume; uses cached PREVIEW estimates (no re-encode probe)"
+    },
+    {
+      "id": "warn-override",
+      "met": true,
+      "via": "Warn mode → COMPRESS ANYWAY / keyboard override; block has no override"
+    },
+    {
+      "id": "free-vs-needed-in-message",
+      "met": true,
+      "via": "formatDiskPreflightMessage: DISK LOW — free X / need Y"
+    }
+  ],
+  "choices": {
+    "headroomBytes": 67108864,
+    "missingEstimateMultiplier": 1.1,
+    "warnRatio": 1.25,
+    "blockWhen": "freeBytes < neededBytes",
+    "warnWhen": "freeBytes < neededBytes * 1.25"
+  },
+  "notes": [
+    "neededBytes = sum(estimate or 1.1×source) + 64 MiB headroom per volume",
+    "Watch-folder: block refuses enqueue; warn surfaces status and continues (no override UI)"
+  ]
+}

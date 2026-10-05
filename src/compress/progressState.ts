@@ -26,6 +26,8 @@ export type ProgressRow = {
   resultBytes?: number;
   durationMs?: number;
   error?: string;
+  /** Latest compress log line (e.g. HW FALLBACK) for the status stream. */
+  statusMessage?: string;
   /** Admission generation for this row's batch; scopes batch summary. */
   batchGeneration?: number;
 };
@@ -315,8 +317,13 @@ export function applyCompressEvent(
       };
       return copy;
     }
-    case "log":
-      return working;
+    case "log": {
+      copy[idx] = {
+        ...row,
+        statusMessage: event.message,
+      };
+      return copy;
+    }
     case "complete":
       // Complete may win over ABORTING (cancel raced with a finished encode).
       // Do not overwrite FAILED/SKIPPED/COMPLETE — late complete after failure

@@ -1,3 +1,7 @@
+import {
+  batchCompletionAnnouncement,
+  opsPhaseStatusText,
+} from "../a11y/announce";
 import { formatBytes } from "../intake/formatBytes";
 import type { BatchSummary } from "../compress/batchSummary";
 import {
@@ -20,15 +24,10 @@ type Props = {
   phase: OpsPhase;
   batchSummary: BatchSummary | null;
   error: string | null;
-  starting: boolean;
   canAbort: boolean;
   aborting: boolean;
   canRetryFailed: boolean;
   canDismissFailed: boolean;
-  stagedCount: number;
-  estimating?: boolean;
-  onStart: () => void;
-  onPreview?: () => void;
   onAbort: () => void;
   onCancelOne: (jobId: string) => void;
   onClearFinished: () => void;
@@ -60,7 +59,8 @@ function rowDetail(row: ProgressRow): string {
       formatBytes,
     );
     const out = row.outputPath ?? "—";
-    return delta ? `${out} · ${delta}` : out;
+    const base = delta ? `${out} · ${delta}` : out;
+    return row.statusMessage ? `${base} · ${row.statusMessage}` : base;
   }
   if (row.phase === "SKIPPED") {
     const reason = row.error ?? "already compressed for this preset";
@@ -70,11 +70,8 @@ function rowDetail(row: ProgressRow): string {
   if (row.phase === "FAILED" && row.error) {
     return row.error;
   }
-  return formatByteMeter(row.bytesProcessed, row.bytesTotal, formatBytes);
-}
-
-function summaryLine(summary: BatchSummary): string {
-  return `OK ${summary.succeeded} · FAIL ${summary.failed}`;
+  const meter = formatByteMeter(row.bytesProcessed, row.bytesTotal, formatBytes);
+  return row.statusMessage ? `${row.statusMessage} · ${meter}` : meter;
 }
 
 export function CompressProgressPanel({
@@ -82,15 +79,10 @@ export function CompressProgressPanel({
   phase,
   batchSummary,
   error,
-  starting,
   canAbort,
   aborting,
   canRetryFailed,
   canDismissFailed,
-  stagedCount,
-  estimating = false,
-  onStart,
-  onPreview,
   onAbort,
   onCancelOne,
   onClearFinished,
@@ -103,20 +95,25 @@ export function CompressProgressPanel({
   const stats = aggregateSessionStats(rows);
   const hasFinished =
     stats.filesDone + stats.filesFailed + stats.filesSkipped > 0;
+  const metersComplete = phase === "COMPLETE";
 
   return (
     <section className="hud-frame compress-panel" aria-label="Compress progress">
       <div className="compress-top">
-        <div className="compress-status-wrap">
+        <div
+          className="compress-status-wrap"
+          aria-live="polite"
+          aria-atomic="true"
+        >
           <p className={`compress-status tone-${tone}`}>
             {(phase === "COMPRESSING" || phase === "ABORTING") && (
               <span className="hud-tick" aria-hidden="true" />
             )}
-            {phase}
+            {opsPhaseStatusText(phase)}
           </p>
           {batchSummary ? (
             <p className="compress-batch-summary mono" role="status">
-              {summaryLine(batchSummary)}
+              {batchCompletionAnnouncement(batchSummary)}
             </p>
           ) : null}
           {error ? (
@@ -127,7 +124,7 @@ export function CompressProgressPanel({
         </div>
 
         <div
-          className="compress-meters"
+          className={`compress-meters${metersComplete ? " meters-complete" : ""}`}
           aria-label="Session savings"
           data-testid="session-meters"
         >
@@ -166,26 +163,6 @@ export function CompressProgressPanel({
         </div>
 
         <div className="compress-actions">
-          {onPreview ? (
-            <button
-              type="button"
-              className="btn"
-              disabled={
-                estimating || starting || stagedCount === 0 || canAbort
-              }
-              onClick={onPreview}
-            >
-              {estimating ? "ESTIMATING" : "PREVIEW"}
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="btn primary"
-            disabled={starting || stagedCount === 0 || canAbort}
-            onClick={onStart}
-          >
-            {starting ? "STARTING" : "COMPRESS"}
-          </button>
           <button
             type="button"
             className={`btn danger${aborting ? " aborting" : ""}`}
@@ -235,8 +212,25 @@ export function CompressProgressPanel({
       ) : (
         <ul className="compress-list">
           {rows.map((row) => (
-            <li key={row.jobId} className="compress-row">
-              <span className="compress-row-phase">{row.phase}</span>
+            <li
+              key={row.jobId}
+              className={[
+                "compress-row",
+                row.phase === "COMPLETE" ? "is-complete" : "",
+                row.phase === "ABORTING" ? "is-aborting" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+            >
+              <span className="compress-row-phase">
+                {row.phase === "ABORTING" ? (
+                  <span className="abort-spinner" aria-hidden="true" />
+                ) : null}
+                {row.phase === "COMPRESSING" ? (
+                  <span className="hud-tick" aria-hidden="true" />
+                ) : null}
+                {opsPhaseStatusText(row.phase)}
+              </span>
               <div className="compress-row-main">
                 <span className="compress-path mono" title={row.sourcePath}>
                   {row.sourcePath}
@@ -251,7 +245,9 @@ export function CompressProgressPanel({
                 aria-valuemax={100}
               >
                 <span
-                  className="compress-bar-fill"
+                  className={`compress-bar-fill${
+                    row.phase === "COMPRESSING" ? " is-running" : ""
+                  }`}
                   style={{ width: `${Math.min(100, Math.max(0, row.percent))}%` }}
                 />
               </div>

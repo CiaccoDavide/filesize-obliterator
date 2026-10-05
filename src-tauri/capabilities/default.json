@@ -6,8 +6,10 @@
   "permissions": [
     "core:default",
     "core:window:allow-set-size",
+    "core:window:allow-set-focus",
     "core:window:allow-destroy",
     "dialog:default",
+    "notification:default",
     "opener:allow-reveal-item-in-dir",
     {
       "identifier": "opener:allow-open-path",

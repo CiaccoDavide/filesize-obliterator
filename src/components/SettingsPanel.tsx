@@ -8,16 +8,23 @@ import {
 type Props = {
   settings: AppSettings;
   disabled?: boolean;
+  /** Offline probe result: `HW: READY` or `HW: UNAVAILABLE`. */
+  hwStatus?: string | null;
   onConcurrency: (n: number) => void;
   onStripMetadata: (on: boolean) => void;
+  onPreferHardware: (on: boolean) => void;
+  onNotifyOnComplete: (on: boolean) => void;
   onUiDensity: (density: UiDensity) => void;
 };
 
 export function SettingsPanel({
   settings,
   disabled = false,
+  hwStatus = null,
   onConcurrency,
   onStripMetadata,
+  onPreferHardware,
+  onNotifyOnComplete,
   onUiDensity,
 }: Props) {
   return (
@@ -60,11 +67,46 @@ export function SettingsPanel({
           ? "EXIF/GPS removed on image/video outputs."
           : "Preserve orientation and tags where the pipeline allows."}
       </p>
-      <p
-        className="hud-toggle-hint mono"
-        data-testid="strip-metadata-payload"
-      >
-        compress_start.stripMetadata={String(settings.stripMetadata)}
+
+      <label className="hud-toggle">
+        <input
+          type="checkbox"
+          checked={settings.preferHardware}
+          disabled={disabled}
+          onChange={(e) => onPreferHardware(e.target.checked)}
+        />
+        <span className="hud-toggle-label">Prefer hardware</span>
+        <span className="mono hud-toggle-state">
+          {settings.preferHardware ? "ON" : "OFF"}
+        </span>
+      </label>
+      <p className="hud-toggle-hint">
+        {settings.preferHardware
+          ? "Use VideoToolbox / NVENC / QSV / AMF when a local ffmpeg HW session can init; soft-fallback to libx264."
+          : "Always encode video with software libx264."}
+      </p>
+      {hwStatus ? (
+        <p className="hud-toggle-hint mono" role="status">
+          {hwStatus}
+        </p>
+      ) : null}
+
+      <label className="hud-toggle">
+        <input
+          type="checkbox"
+          checked={settings.notifyOnComplete}
+          disabled={disabled}
+          onChange={(e) => onNotifyOnComplete(e.target.checked)}
+        />
+        <span className="hud-toggle-label">Notify on complete</span>
+        <span className="mono hud-toggle-state">
+          {settings.notifyOnComplete ? "ON" : "OFF"}
+        </span>
+      </label>
+      <p className="hud-toggle-hint">
+        {settings.notifyOnComplete
+          ? "Local OS notification when a batch finishes while this window is unfocused."
+          : "No OS notifications when a batch finishes."}
       </p>
 
       <div className="settings-density" role="group" aria-label="UI density">

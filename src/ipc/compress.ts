@@ -18,6 +18,8 @@ export type CompressStartRequest = {
   presetId: string;
   /** Default true when omitted by older callers — strip EXIF/GPS / container tags. */
   stripMetadata?: boolean;
+  /** Default true — prefer HW video encode when available; falls back to software. */
+  preferHardware?: boolean;
   /** Default false — skip when an output already exists for this source+preset. */
   force?: boolean;
 };
@@ -120,6 +122,41 @@ export function compressEstimate(
   request: CompressEstimateRequest,
 ): Promise<CompressEstimateResult> {
   return invoke<CompressEstimateResult>("compress_estimate", { request });
+}
+
+/** Mirrored from Rust `compress::disk_preflight::DiskPreflightMode`. */
+export type DiskPreflightMode = "block" | "warn" | "ok";
+
+/** Mirrored from Rust `compress::disk_preflight::DiskPreflightItem`. */
+export type DiskPreflightItem = {
+  sourcePath: string;
+  originalBytes: number;
+  estimatedBytes?: number;
+};
+
+/** Mirrored from Rust `compress::disk_preflight::DiskPreflightRequest`. */
+export type DiskPreflightRequest = {
+  items: DiskPreflightItem[];
+};
+
+/** Mirrored from Rust `compress::disk_preflight::DiskPreflightResult`. */
+export type DiskPreflightResult = {
+  ok: boolean;
+  freeBytes: number;
+  neededBytes: number;
+  mode: DiskPreflightMode;
+};
+
+/** Offline disk-space preflight — free vs needed on output volumes. */
+export function compressDiskPreflight(
+  request: DiskPreflightRequest,
+): Promise<DiskPreflightResult> {
+  return invoke<DiskPreflightResult>("compress_disk_preflight", { request });
+}
+
+/** Offline HW encode probe — `HW: READY` or `HW: UNAVAILABLE`. */
+export function compressHwEncodeStatus(): Promise<string> {
+  return invoke<string>("compress_hw_encode_status");
 }
 
 export function listenCompressEvents(

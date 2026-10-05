@@ -38,8 +38,20 @@ fn default_strip_metadata() -> bool {
     true
 }
 
+fn default_prefer_hardware() -> bool {
+    true
+}
+
 fn default_ui_density() -> String {
     "compact".into()
+}
+
+fn default_briefing_seen() -> bool {
+    false
+}
+
+fn default_notify_on_complete() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,10 +65,19 @@ pub struct AppSettings {
     pub concurrency: usize,
     #[serde(default = "default_strip_metadata")]
     pub strip_metadata: bool,
+    /// Prefer platform HW video encode when the local toolchain exposes it.
+    #[serde(default = "default_prefer_hardware")]
+    pub prefer_hardware: bool,
     #[serde(default = "default_ui_density")]
     pub ui_density: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_size: Option<WindowSize>,
+    /// True after the operator ACKs the first-run briefing overlay.
+    #[serde(default = "default_briefing_seen")]
+    pub briefing_seen: bool,
+    /// Local OS notification when a batch finishes while the window is unfocused.
+    #[serde(default = "default_notify_on_complete")]
+    pub notify_on_complete: bool,
 }
 
 fn default_settings_version() -> u32 {
@@ -74,8 +95,11 @@ impl Default for AppSettings {
             default_presets: DefaultPresets::default(),
             concurrency: DEFAULT_CONCURRENCY,
             strip_metadata: true,
+            prefer_hardware: true,
             ui_density: "compact".into(),
             window_size: None,
+            briefing_seen: false,
+            notify_on_complete: true,
         }
     }
 }
@@ -227,12 +251,16 @@ mod tests {
             "defaultPresets": { "image": "image-small", "pdf": "pdf-screen" },
             "concurrency": 1,
             "stripMetadata": false,
+            "preferHardware": false,
             "uiDensity": "regular",
-            "windowSize": { "width": 960, "height": 720 }
+            "windowSize": { "width": 960, "height": 720 },
+            "briefingSeen": true,
+            "notifyOnComplete": false
         }"#;
         let parsed = parse_settings_str(raw);
         assert_eq!(parsed.concurrency, 1);
         assert!(!parsed.strip_metadata);
+        assert!(!parsed.prefer_hardware);
         assert_eq!(parsed.ui_density, "regular");
         assert_eq!(parsed.default_presets.image.as_deref(), Some("image-small"));
         assert_eq!(parsed.default_presets.pdf.as_deref(), Some("pdf-screen"));
@@ -243,6 +271,32 @@ mod tests {
                 height: 720
             })
         );
+        assert!(parsed.briefing_seen);
+        assert!(!parsed.notify_on_complete);
+    }
+
+    #[test]
+    fn missing_briefing_seen_defaults_false() {
+        let parsed = parse_settings_str(
+            r#"{"version":1,"concurrency":2,"stripMetadata":true,"uiDensity":"compact"}"#,
+        );
+        assert!(!parsed.briefing_seen);
+    }
+
+    #[test]
+    fn missing_prefer_hardware_defaults_true() {
+        let parsed = parse_settings_str(
+            r#"{"version":1,"concurrency":2,"stripMetadata":true,"uiDensity":"compact"}"#,
+        );
+        assert!(parsed.prefer_hardware);
+    }
+
+    #[test]
+    fn missing_notify_on_complete_defaults_true() {
+        let parsed = parse_settings_str(
+            r#"{"version":1,"concurrency":2,"stripMetadata":true,"uiDensity":"compact"}"#,
+        );
+        assert!(parsed.notify_on_complete);
     }
 
     #[test]
@@ -271,7 +325,10 @@ mod tests {
         assert_eq!(d.version, SETTINGS_VERSION);
         assert_eq!(d.concurrency, DEFAULT_CONCURRENCY);
         assert!(d.strip_metadata);
+        assert!(d.prefer_hardware);
         assert!(d.window_size.is_none());
+        assert!(!d.briefing_seen);
+        assert!(d.notify_on_complete);
     }
 
     #[test]

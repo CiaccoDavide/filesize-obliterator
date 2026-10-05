@@ -12,6 +12,10 @@ export function createBatchAdmissionController() {
     abort(): void {
       generation += 1;
     },
+    /** Latest admission generation (0 before any begin/abort). */
+    current(): number {
+      return generation;
+    },
     isCurrent(token: number): boolean {
       return token === generation;
     },
