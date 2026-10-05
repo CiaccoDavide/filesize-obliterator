@@ -1,13 +1,14 @@
-//! Offline PDF compress via a local Ghostscript binary (sidecar / PATH / `GS_PATH`).
+//! Offline PDF compress via a local Ghostscript binary (PATH / `GS_PATH` only; not bundled).
 //!
 //! Inputs: `.pdf`. Output: `.pdf` at print / ebook / screen image DPI targets.
 //! No network. Missing Ghostscript → `missing tool: ghostscript…`.
+//! AGPL Ghostscript is intentionally not redistributed — see THIRD_PARTY_NOTICES.md.
 //! Encrypted/password PDFs → clear `encrypted` error (no password UI).
 //! Bad input → `unsupported or corrupt pdf…`.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -253,6 +254,7 @@ pub fn encode_pdf(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use super::*;
     use crate::compress::output::prepare_output_path;
     use crate::compress::presets::{PDF_EBOOK, PDF_PRINT, PDF_SCREEN};
@@ -279,6 +281,9 @@ mod tests {
         match resolve_ghostscript() {
             Ok(p) => Some(p),
             Err(e) => {
+                if crate::compress::sidecar::encoders_required() {
+                    panic!("FO_REQUIRE_ENCODERS=1 but ghostscript missing: {e}");
+                }
                 eprintln!("ignoring test: {e}");
                 None
             }

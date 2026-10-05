@@ -5,7 +5,7 @@
 //! No network. Missing ffmpeg → `missing tool: ffmpeg…`. Bad input → `unsupported or corrupt video…`.
 
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -152,6 +152,7 @@ pub fn encoder_listed_in(encoders_text: &str, encoder: HwVideoEncoder) -> bool {
 }
 
 /// Parse `ffmpeg -encoders` text for the first preferred HW encoder that is listed.
+#[allow(dead_code)] // used by unit tests; detection path uses detect_hw_encoder
 pub fn select_hw_encoder_from_list(encoders_text: &str) -> Option<HwVideoEncoder> {
     hw_encoder_candidates()
         .iter()
@@ -611,6 +612,7 @@ fn encode_video_with_hw(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use super::*;
     use crate::compress::presets::{VIDEO_BALANCED, VIDEO_HIGH, VIDEO_SMALL};
     use crate::compress::output::prepare_output_path;
@@ -645,6 +647,9 @@ mod tests {
         match resolve_ffmpeg() {
             Ok(p) => Some(p),
             Err(e) => {
+                if crate::compress::sidecar::encoders_required() {
+                    panic!("FO_REQUIRE_ENCODERS=1 but ffmpeg missing: {e}");
+                }
                 eprintln!("ignoring test: {e}");
                 None
             }

@@ -1,10 +1,14 @@
-//! Resolve vendored encoder sidecars for offline release bundles.
+//! Resolve encoder tools for offline use.
 //!
-//! Lookup order (no network):
-//! 1. Explicit env var (`FFMPEG_PATH` / `GS_PATH`) when set to an existing file
+//! ffmpeg lookup order (no network):
+//! 1. Explicit env var (`FFMPEG_PATH`) when set to an existing working file
 //! 2. Beside the running executable (Tauri `bundle.externalBin` drop-in)
 //! 3. Common Tauri resource / binaries layouts relative to the exe
-//! 4. Host `PATH` (dev machines / CI); release bundles should not need this
+//! 4. `src-tauri/binaries` (fetch script output) during cargo test / dev
+//! 5. Host `PATH` (dev machines / CI)
+//!
+//! Ghostscript is **PATH / `GS_PATH` only** — AGPL, not redistributed via externalBin.
+//! See `THIRD_PARTY_NOTICES.md`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -19,6 +23,8 @@ pub struct ToolSpec {
     /// `PATH` / spawn names (Windows may differ from Unix).
     pub path_names: &'static [&'static str],
     pub install_hint: &'static str,
+    /// When false, skip sidecar / binaries layouts (PATH + env only).
+    pub allow_sidecar: bool,
 }
 
 pub const FFMPEG: ToolSpec = ToolSpec {
@@ -28,6 +34,7 @@ pub const FFMPEG: ToolSpec = ToolSpec {
     path_names: &["ffmpeg"],
     install_hint: "Install ffmpeg locally or bundle it via `scripts/fetch-sidecars.sh` \
 (Tauri externalBin) for offline video compression.",
+    allow_sidecar: true,
 };
 
 pub const GHOSTSCRIPT: ToolSpec = ToolSpec {
@@ -35,8 +42,9 @@ pub const GHOSTSCRIPT: ToolSpec = ToolSpec {
     label: "ghostscript",
     file_names: &["gs", "gs.exe", "gswin64c.exe", "gswin32c.exe", "ghostscript"],
     path_names: &["gs", "gswin64c", "gswin32c", "ghostscript"],
-    install_hint: "Install Ghostscript locally or bundle it via `scripts/fetch-sidecars.sh` \
-(Tauri externalBin) for offline PDF compression.",
+    install_hint: "Install Ghostscript on the host (PATH) or set GS_PATH. \
+Ghostscript is AGPL and is not bundled in the installer — see THIRD_PARTY_NOTICES.md.",
+    allow_sidecar: false,
 };
 
 /// Ordered candidate paths for a tool under `exe_dir` (parent of `current_exe`).
@@ -97,8 +105,21 @@ fn push_unique(out: &mut Vec<PathBuf>, path: PathBuf) {
     }
 }
 
-fn first_existing_file(candidates: &[PathBuf]) -> Option<PathBuf> {
-    candidates.iter().find(|p| p.is_file()).cloned()
+fn probe_version(path: &Path, version_arg: &str) -> bool {
+    Command::new(path)
+        .arg(version_arg)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn first_working_file(candidates: &[PathBuf], version_arg: &str) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .find(|p| p.is_file() && probe_version(p, version_arg))
+        .cloned()
 }
 
 fn which_on_path(names: &[&str], version_arg: &str) -> Option<PathBuf> {
@@ -120,11 +141,11 @@ fn which_on_path(names: &[&str], version_arg: &str) -> Option<PathBuf> {
 pub fn resolve_tool(spec: &ToolSpec, version_arg: &str) -> Result<PathBuf, String> {
     if let Ok(explicit) = std::env::var(spec.env_var) {
         let p = PathBuf::from(explicit.trim());
-        if p.is_file() {
+        if p.is_file() && probe_version(&p, version_arg) {
             return Ok(p);
         }
         return Err(format!(
-            "missing tool: {} ({} set but not a file: {})",
+            "missing tool: {} ({} set but not a working file: {})",
             spec.label,
             spec.env_var,
             p.display()
@@ -136,32 +157,34 @@ pub fn resolve_tool(spec: &ToolSpec, version_arg: &str) -> Result<PathBuf, Strin
         .or_else(|| std::env::var("TARGET").ok())
         .or_else(host_target_triple);
 
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidates = sidecar_candidates(dir, spec.file_names, triple.as_deref());
-            if let Some(found) = first_existing_file(&candidates) {
-                return Ok(found);
-            }
-        }
-    }
-
-    // Dev/test: also scan src-tauri/binaries (fetch script output) when present.
-    let manifest_binaries = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
-    if manifest_binaries.is_dir() {
-        let mut direct = Vec::new();
-        for name in spec.file_names {
-            direct.push(manifest_binaries.join(name));
-            if let Some(t) = triple.as_deref() {
-                if let Some(stem) = name.strip_suffix(".exe") {
-                    direct.push(manifest_binaries.join(format!("{stem}-{t}.exe")));
-                } else {
-                    direct.push(manifest_binaries.join(format!("{name}-{t}")));
-                    direct.push(manifest_binaries.join(format!("{name}-{t}.exe")));
+    if spec.allow_sidecar {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let candidates = sidecar_candidates(dir, spec.file_names, triple.as_deref());
+                if let Some(found) = first_working_file(&candidates, version_arg) {
+                    return Ok(found);
                 }
             }
         }
-        if let Some(found) = first_existing_file(&direct) {
-            return Ok(found);
+
+        // Dev/test: also scan src-tauri/binaries (fetch script output) when present.
+        let manifest_binaries = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries");
+        if manifest_binaries.is_dir() {
+            let mut direct = Vec::new();
+            for name in spec.file_names {
+                direct.push(manifest_binaries.join(name));
+                if let Some(t) = triple.as_deref() {
+                    if let Some(stem) = name.strip_suffix(".exe") {
+                        direct.push(manifest_binaries.join(format!("{stem}-{t}.exe")));
+                    } else {
+                        direct.push(manifest_binaries.join(format!("{name}-{t}")));
+                        direct.push(manifest_binaries.join(format!("{name}-{t}.exe")));
+                    }
+                }
+            }
+            if let Some(found) = first_working_file(&direct, version_arg) {
+                return Ok(found);
+            }
         }
     }
 
@@ -189,6 +212,15 @@ pub fn resolve_ffmpeg() -> Result<PathBuf, String> {
 
 pub fn resolve_ghostscript() -> Result<PathBuf, String> {
     resolve_tool(&GHOSTSCRIPT, "-v")
+}
+
+/// When `FO_REQUIRE_ENCODERS=1`, encode soft-skips become hard failures (CI).
+#[cfg(test)]
+pub fn encoders_required() -> bool {
+    matches!(
+        std::env::var("FO_REQUIRE_ENCODERS").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
+    )
 }
 
 #[cfg(test)]
@@ -244,48 +276,105 @@ mod tests {
         let exe_dir = PathBuf::from(r"C:\Program Files\App");
         let c = sidecar_candidates(
             &exe_dir,
-            &["gs.exe", "gswin64c.exe"],
+            &["ffmpeg.exe"],
             Some("x86_64-pc-windows-msvc"),
         );
-        assert!(c.iter().any(|p| p == &exe_dir.join("gs.exe")));
+        assert!(c.iter().any(|p| p == &exe_dir.join("ffmpeg.exe")));
         assert!(c.iter().any(|p| {
-            p == &exe_dir.join("binaries/gs-x86_64-pc-windows-msvc.exe")
-                || p == &exe_dir.join("gs-x86_64-pc-windows-msvc.exe")
+            p == &exe_dir.join("binaries/ffmpeg-x86_64-pc-windows-msvc.exe")
+                || p == &exe_dir.join("ffmpeg-x86_64-pc-windows-msvc.exe")
         }));
     }
 
     #[test]
-    fn first_existing_picks_bundled_sibling_without_path() {
-        let dir = temp_dir("sibling");
-        let ffmpeg = dir.join("ffmpeg");
-        touch(&ffmpeg);
+    fn first_working_skips_inert_stub_files() {
+        let dir = temp_dir("stub");
+        let stub = dir.join("ffmpeg");
+        touch(&stub);
         let candidates = sidecar_candidates(&dir, &["ffmpeg", "ffmpeg.exe"], None);
-        let found = first_existing_file(&candidates).expect("bundled ffmpeg");
-        assert_eq!(found, ffmpeg);
+        assert!(
+            first_working_file(&candidates, "-version").is_none(),
+            "inert stub must not count as a working ffmpeg"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn first_existing_finds_triple_suffixed_under_binaries() {
+    fn first_working_finds_triple_suffixed_under_binaries_when_probe_ok() {
+        // Use a tiny shell script that answers -version successfully when possible.
         let dir = temp_dir("triple");
         let dest = dir
             .join("binaries")
             .join("ffmpeg-x86_64-unknown-linux-gnu");
-        touch(&dest);
-        let candidates =
-            sidecar_candidates(&dir, &["ffmpeg"], Some("x86_64-unknown-linux-gnu"));
-        let found = first_existing_file(&candidates).expect("triple ffmpeg");
-        assert_eq!(found, dest);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).expect("parent");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::write(
+                &dest,
+                b"#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo ffmpeg; exit 0; fi\nexit 1\n",
+            )
+            .expect("write");
+            let mut perms = fs::metadata(&dest).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&dest, perms).unwrap();
+            let candidates =
+                sidecar_candidates(&dir, &["ffmpeg"], Some("x86_64-unknown-linux-gnu"));
+            let found = first_working_file(&candidates, "-version").expect("triple ffmpeg");
+            assert_eq!(found, dest);
+        }
+        #[cfg(not(unix))]
+        {
+            // On Windows, inert files are skipped; PATH coverage is separate.
+            touch(&dest);
+            let candidates =
+                sidecar_candidates(&dir, &["ffmpeg"], Some("x86_64-unknown-linux-gnu"));
+            assert!(first_working_file(&candidates, "-version").is_none());
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn ghostscript_candidates_cover_unix_and_windows_names() {
-        let dir = PathBuf::from("/opt/app");
-        let c = sidecar_candidates(&dir, GHOSTSCRIPT.file_names, None);
-        assert!(c.iter().any(|p| p.file_name().and_then(|s| s.to_str()) == Some("gs")));
-        assert!(c
-            .iter()
-            .any(|p| p.file_name().and_then(|s| s.to_str()) == Some("gswin64c.exe")));
+    fn ghostscript_disallows_sidecar_layout() {
+        assert!(!GHOSTSCRIPT.allow_sidecar);
+        assert!(FFMPEG.allow_sidecar);
+    }
+
+    #[test]
+    fn staged_or_path_ffmpeg_resolves_when_encoders_required() {
+        if !encoders_required() {
+            // Soft path: still exercise resolve; soft-skip only when truly absent.
+            match resolve_ffmpeg() {
+                Ok(p) => assert!(p.as_os_str().len() > 0, "empty ffmpeg path"),
+                Err(e) => eprintln!("ignoring test: {e}"),
+            }
+            return;
+        }
+        let path = resolve_ffmpeg().expect("FO_REQUIRE_ENCODERS=1 requires working ffmpeg");
+        assert!(
+            probe_version(&path, "-version"),
+            "resolved ffmpeg must answer -version: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn path_ghostscript_resolves_when_encoders_required() {
+        if !encoders_required() {
+            match resolve_ghostscript() {
+                Ok(p) => assert!(p.as_os_str().len() > 0),
+                Err(e) => eprintln!("ignoring test: {e}"),
+            }
+            return;
+        }
+        let path =
+            resolve_ghostscript().expect("FO_REQUIRE_ENCODERS=1 requires Ghostscript on PATH");
+        assert!(
+            probe_version(&path, "-v"),
+            "resolved ghostscript must answer -v: {}",
+            path.display()
+        );
     }
 }

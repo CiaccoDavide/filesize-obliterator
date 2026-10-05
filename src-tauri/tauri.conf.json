@@ -30,8 +30,7 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/ffmpeg",
-      "binaries/gs"
+      "binaries/ffmpeg"
     ],
     "icon": [
       "icons/32x32.png",

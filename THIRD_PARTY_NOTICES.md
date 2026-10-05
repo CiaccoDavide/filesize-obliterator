@@ -1,36 +1,38 @@
 # Third-party notices — Filesize Obliterator
 
-This desktop app is **offline-only** and vendors local encoder tools into release
-bundles via Tauri `bundle.externalBin` (`src-tauri/binaries/`). Binary blobs are
+This desktop app is **offline-only**. Release bundles vendor a **relocatable ffmpeg**
+sidecar via Tauri `bundle.externalBin` (`src-tauri/binaries/`). Binary blobs are
 **not** committed to git; maintainers and CI run `scripts/fetch-sidecars.sh`
-before `tauri build`.
+before `tauri build` / `cargo test`.
 
-This product is **not sold**. Keep redistributed tools limited to the licenses
-below (prefer LGPL/MIT/BSD/Apache for ffmpeg builds; Ghostscript is AGPL).
+This product redistributes only **permissive / LGPL-friendly** encoder binaries
+(prefer LGPL/MIT/BSD/Apache ffmpeg builds). **AGPL Ghostscript is not redistributed**
+in the installer.
 
 ## FFmpeg
 
 - **Purpose:** offline video compress (H.264 / AAC → MP4)
 - **Bundling:** `binaries/ffmpeg-<target-triple>[.exe]` → Tauri externalBin `binaries/ffmpeg`
-- **Typical sources used by the fetch script:**
-  - [johnvansickle.com static builds](https://johnvansickle.com/ffmpeg/) (Linux)
-  - [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) LGPL shared Windows packages when downloaded
-  - Host package manager / PATH copy (`--from-path`) on macOS and other hosts without a pinned URL
+- **Sources used by the fetch script (static / single-file, relocatable offline):**
+  - [johnvansickle.com static builds](https://johnvansickle.com/ffmpeg/) (Linux amd64/arm64)
+  - [eugeneware/ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) single-file gzip builds (macOS x64/arm64, Windows x64)
+  - Host `PATH` copy (`--from-path`) only as a **dev/CI fallback** — Homebrew/dylib-linked copies are **not** suitable for clean-machine offline releases
 - **License:** FFmpeg is licensed under the **LGPL** and/or **GPL** depending on the
   build configuration and enabled libraries. Prefer **LGPL** builds for redistribution.
   Upstream: https://ffmpeg.org/legal.html
 
-## Ghostscript (Artifex)
+## Ghostscript (Artifex) — PATH-only exception
 
 - **Purpose:** offline PDF recompress (`pdfwrite` / `PDFSETTINGS`)
-- **Bundling:** `binaries/gs-<target-triple>[.exe]` → Tauri externalBin `binaries/gs`
-  (Windows installs often expose `gswin64c.exe`; the fetch script copies it as `gs-…`)
-- **Typical sources:** system package (`apt` / `brew` / Windows installer) copied by
-  `scripts/fetch-sidecars.sh`
-- **License:** **AGPL-3.0** (Artifex Ghostscript). Because this app is not sold and
-  source is available, AGPL redistribution of the sidecar is intentional. Review
-  Artifex terms before any commercial distribution change:
-  https://www.ghostscript.com/licensing/index.html
+- **Bundling:** **None.** `gs` is **not** listed in `bundle.externalBin` and must not be
+  copied into `src-tauri/binaries/` for redistribution.
+- **Runtime:** resolve via `GS_PATH` or host `PATH` (`gs` / `gswin64c` / `gswin32c`).
+  End users who need PDF compress install Ghostscript themselves (or set `GS_PATH`).
+- **Why PATH-only:** Artifex Ghostscript is **AGPL-3.0**. This project does not redistribute
+  AGPL binaries in the installer. No permissive drop-in currently replaces the existing
+  `pdfwrite` pipeline without a full PDF-stack rewrite, so Ghostscript remains a
+  **documented PATH-only dependency** (bundling not possible due to license).
+- **License reference:** https://www.ghostscript.com/licensing/index.html
 
 ## Other runtime codecs
 

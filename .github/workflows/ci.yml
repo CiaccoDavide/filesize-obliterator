@@ -1,10 +1,10 @@
 # CI — test + desktop build matrix (issue #16 / #17)
 
-# Offline-friendly: no SaaS compression APIs. Video/PDF encode smokes soft-skip when
-# ffmpeg/gs are absent; we install them via OS packages when available so smokes run.
-# Release sidecars: `scripts/fetch-sidecars.sh` stages binaries into src-tauri/binaries/
-# (gitignored) before `tauri build`. If fetch cannot stage tools, the build job fails
-# with a clear log — re-run after installing ffmpeg + Ghostscript on the runner.
+# Offline-friendly: no SaaS compression APIs.
+# externalBin requires a staged ffmpeg before any cargo/tauri build — CI always
+# runs `scripts/fetch-sidecars.sh` (download or --stubs) before Rust tests.
+# Ghostscript is PATH-only (AGPL — not redistributed); OS packages feed PDF tests.
+# FO_REQUIRE_ENCODERS=1 disables soft-skips once tools are staged/installed.
 
 name: CI
 
@@ -50,14 +50,14 @@ jobs:
             ffmpeg \
             ghostscript
 
-      - name: Install macOS encoder tools
+      - name: Install macOS encoder tools (PATH Ghostscript + brew ffmpeg fallback)
         if: runner.os == 'macOS'
         run: |
           brew install ffmpeg ghostscript || brew upgrade ffmpeg ghostscript || true
           command -v ffmpeg
           command -v gs
 
-      - name: Install Windows encoder tools
+      - name: Install Windows encoder tools (PATH Ghostscript)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -80,13 +80,33 @@ jobs:
       - name: npm ci
         run: npm ci
 
+      - name: Stage ffmpeg sidecars (externalBin — required before cargo test)
+        shell: bash
+        run: |
+          chmod +x scripts/fetch-sidecars.sh
+          # Prefer static download; fall back to stubs so tauri-build never blocks unit tests.
+          if ./scripts/fetch-sidecars.sh; then
+            echo "staged relocatable ffmpeg"
+          else
+            echo "WARN: download failed; staging stubs for tauri-build"
+            ./scripts/fetch-sidecars.sh --stubs
+          fi
+          ls -la src-tauri/binaries/
+          # Guard: no AGPL gs must land in binaries/
+          if ls src-tauri/binaries/gs-* >/dev/null 2>&1; then
+            echo "ERROR: Ghostscript sidecars must not be staged (AGPL)" >&2
+            exit 1
+          fi
+
       - name: Typecheck
         run: npm run typecheck
 
       - name: Frontend tests
         run: npm test
 
-      - name: Rust tests
+      - name: Rust tests (encoders required — no soft-skip)
+        env:
+          FO_REQUIRE_ENCODERS: "1"
         run: npm run test:rust
 
   build:
@@ -114,19 +134,7 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            patchelf \
-            ffmpeg \
-            ghostscript
-
-      - name: Install macOS encoder tools
-        if: runner.os == 'macOS'
-        run: |
-          brew install ffmpeg ghostscript || brew upgrade ffmpeg ghostscript || true
-
-      - name: Install Windows encoder tools
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: choco install ffmpeg ghostscript -y --no-progress
+            patchelf
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -142,12 +150,16 @@ jobs:
       - name: npm ci
         run: npm ci
 
-      - name: Stage sidecars (externalBin)
+      - name: Stage relocatable ffmpeg (externalBin)
         shell: bash
         run: |
           chmod +x scripts/fetch-sidecars.sh
-          ./scripts/fetch-sidecars.sh --from-path
+          ./scripts/fetch-sidecars.sh
           ls -la src-tauri/binaries/
+          if ls src-tauri/binaries/gs-* >/dev/null 2>&1; then
+            echo "ERROR: Ghostscript sidecars must not be staged (AGPL)" >&2
+            exit 1
+          fi
 
       - name: Tauri build
         run: npm run build

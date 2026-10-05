@@ -314,7 +314,7 @@ fn settings_persist_locally_without_network_plugins() {
 }
 
 #[test]
-fn bundle_external_bin_lists_ffmpeg_and_gs() {
+fn bundle_external_bin_lists_ffmpeg_not_agpl_gs() {
     let conf = parse_json(&repo_root().join("src-tauri/tauri.conf.json"));
     let bins = conf
         .pointer("/bundle/externalBin")
@@ -326,8 +326,8 @@ fn bundle_external_bin_lists_ffmpeg_and_gs() {
         "externalBin must include binaries/ffmpeg: {names:?}"
     );
     assert!(
-        names.iter().any(|n| *n == "binaries/gs"),
-        "externalBin must include binaries/gs: {names:?}"
+        names.iter().all(|n| !n.contains("gs") && !n.contains("ghostscript")),
+        "externalBin must not redistribute AGPL Ghostscript: {names:?}"
     );
 }
 
@@ -375,5 +375,26 @@ fn packaging_docs_and_fetch_script_exist() {
     assert!(
         notices.contains("ffmpeg") && notices.contains("ghostscript"),
         "THIRD_PARTY_NOTICES must cover ffmpeg and Ghostscript"
+    );
+    assert!(
+        notices.contains("path-only") || notices.contains("path only"),
+        "THIRD_PARTY_NOTICES must document Ghostscript as PATH-only (AGPL)"
+    );
+    assert!(
+        notices.contains("agpl"),
+        "THIRD_PARTY_NOTICES must mention AGPL for Ghostscript"
+    );
+    let fetch = read_to_string(&root.join("scripts/fetch-sidecars.sh")).to_lowercase();
+    assert!(
+        fetch.contains("--stubs") && fetch.contains("ffmpeg"),
+        "fetch-sidecars.sh must support --stubs and stage ffmpeg"
+    );
+    assert!(
+        !fetch.contains("stage_gs") || fetch.contains("path-only"),
+        "fetch script must not silently stage AGPL gs for bundling"
+    );
+    assert!(
+        readme.contains("offline smoke") || readme.contains("smoke checklist"),
+        "README must include an offline smoke checklist"
     );
 }

@@ -9,4 +9,4 @@ Small synthetic media used by offline smoke / encode tests. All files are genera
 | Video | `video/tone.*` | Short synthetic clips (MP4/WebM/MKV) |
 | PDF | `pdf/minimal.pdf` | One-page text PDF |
 
-Tests copy fixtures into temp dirs before encoding so paths stay machine-independent. Video/PDF encode tests soft-skip (pass with an `ignoring test: missing tool…` reason on stderr) when `ffmpeg` / Ghostscript are not available.
+Tests copy fixtures into temp dirs before encoding so paths stay machine-independent. Video/PDF encode tests soft-skip (pass with an `ignoring test: missing tool…` reason on stderr) when `ffmpeg` / Ghostscript are not available — unless `FO_REQUIRE_ENCODERS=1` (CI).

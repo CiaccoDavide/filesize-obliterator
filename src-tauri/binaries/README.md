@@ -1,15 +1,18 @@
 # Sidecar binaries (gitignored)
 
-Place platform-specific encoder tools here before `tauri build`.
+Place platform-specific **ffmpeg** here before `tauri build` / `cargo test`.
 
 | Tool | Config name (`bundle.externalBin`) | On-disk fetch name |
 |------|------------------------------------|--------------------|
 | ffmpeg | `binaries/ffmpeg` | `ffmpeg-<target-triple>` (+ `.exe` on Windows) |
-| Ghostscript | `binaries/gs` | `gs-<target-triple>` (+ `.exe` on Windows; copy of `gswin64c` is fine) |
+| Ghostscript | *(not bundled — AGPL)* | PATH / `GS_PATH` only |
 
 ```bash
-./scripts/fetch-sidecars.sh          # current host triple
-./scripts/fetch-sidecars.sh --all    # best-effort multi-OS downloads (where URLs exist)
+./scripts/fetch-sidecars.sh          # download static/relocatable ffmpeg for this host
+./scripts/fetch-sidecars.sh --stubs  # placeholders so cargo/tauri-build can run without download
+./scripts/fetch-sidecars.sh --all    # best-effort multi-OS downloads
 ```
 
-Rust resolves bundled copies beside the app binary (and under `binaries/` / `resources/`) without PATH hacks. See `compress::sidecar`.
+Rust resolves bundled ffmpeg beside the app binary (and under `binaries/` / `resources/`)
+without PATH hacks. Ghostscript is resolved from `GS_PATH` or PATH only — see
+`THIRD_PARTY_NOTICES.md` and `compress::sidecar`.

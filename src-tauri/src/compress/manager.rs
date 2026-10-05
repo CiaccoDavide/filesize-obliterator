@@ -304,6 +304,7 @@ impl JobManager {
         Ok(())
     }
 
+    #[allow(dead_code)] // used by unit tests / future UI
     pub fn max_concurrent(&self) -> usize {
         self.inner
             .lock()
